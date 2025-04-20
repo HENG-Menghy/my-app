@@ -1,0 +1,261 @@
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  guest // default
+  user
+  admin
+}
+
+enum UserGender {
+  male
+  female
+  other
+}
+
+enum RoomStatus {
+  active // default
+  inactive
+}
+
+enum RoomType {
+  meeting // default
+  conference
+}
+
+enum BookingStatus {
+  pending // default
+  approved
+  rejected
+  cancelled
+  requested_cancellation
+}
+
+enum RecurrencePattern {
+  daily
+  weekly
+  monthly
+}
+
+enum MeetingStatus {
+  ongoing
+  in_progress
+  modified
+  completed
+  cancelled
+}
+
+enum MeetingHistoryAction {
+  created
+  modified
+  reassigned
+  overridden
+  ended
+  cancelled
+}
+
+model User {
+  id String @id @default(uuid())
+  phonenumber String @unique @db.VarChar(255)
+  email String @unique @db.VarChar(255)
+  password String @db.VarChar(255)
+  fullname String @db.VarChar(255)
+  gender UserGender
+  dob DateTime
+  imageUrl String?
+  role UserRole @default(guest)
+  isDeleted Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  bookings   Booking[]  @relation(name: "UserBookings")
+  approvedBy Booking[]  @relation(name: "ApprovedByUser")
+  bookedBy   Booking[]  @relation(name: "BookedByUser")
+  assignedTo Booking[]  @relation(name: "AssignedToUser")
+  recurrenceBookings RecurrenceBooking[] 
+  assignedMeetings  Meeting[]  @relation(name: "AssignedMeetings")
+  modifiedMeetings  Meeting[]  @relation(name: "ModifiedMeetings")
+  meetingHistories MeetingHistory[] 
+  notifications Notification[]
+  reports Report[]
+  systemLogs SystemLog[]
+}
+
+model Booking {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields: [roomId], references: [id])
+  userId String
+  user User @relation(name: "UserBookings", fields: [userId], references: [id])
+  bookedBy String
+  bookedByUser User @relation(name: "BookedByUser", fields: [bookedBy], references: [id])
+  approvedBy String?
+  approvedByUser User? @relation(name: "ApprovedByUser", fields: [approvedBy], references: [id])
+  assignedTo String?
+  assignedToUser User? @relation(name: "AssignedToUser", fields: [assignedTo], references: [id])
+  code String @unique @db.VarChar(255)
+  titleMeeting String 
+  leaderMeeting String @db.VarChar(255)
+  startDateTime DateTime // Store date + time together
+  endDateTime DateTime  // Store date + time together
+  recurrence String?
+  recurrenceBookings RecurrenceBooking? @relation(fields: [recurrence], references: [id])
+  cancellationReason String?
+  status BookingStatus @default(pending)
+  isDeleted Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  meeting Meeting? @relation(name: "BookingId")
+  reference Meeting? @relation(name: "referenceCode")
+  notifications Notification[]
+  reports Report[]
+}
+
+model RecurrenceBooking {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields: [roomId], references: [id])
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  titleMeeting String
+  leaderMeeting String @db.VarChar(255)
+  pattern RecurrencePattern
+  interval Int
+  weekdays String[]
+  dayOfMonth Int?
+  startDate DateTime
+  endDate DateTime
+  startTime String
+  endTime String
+  isActive Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  bookings Booking[]
+}
+
+model Meeting {
+  id String @id @default(uuid())
+  bookingId String @unique
+  booking Booking @relation(name: "BookingId", fields: [bookingId], references: [id])
+  assignedTo String?
+  assignedMeetingTo User? @relation(name: "AssignedMeetings", fields: [assignedTo], references: [id])
+  modifiedBy String?
+  modifiedMeetingBy User? @relation(name: "ModifiedMeetings", fields: [modifiedBy], references: [id])
+  bookingReference String @unique @db.VarChar(255)
+  reference Booking @relation(name: "referenceCode", fields: [bookingReference], references: [code])
+  status MeetingStatus 
+  isDeleted Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  
+  histories  MeetingHistory[]
+  notifications Notification[]
+  reports Report[]
+}
+
+model MeetingHistory {
+  id String @id @default(uuid())
+  meetingId String
+  meeting Meeting @relation(fields: [meetingId], references: [id])
+  modifiedBy String?
+  user User? @relation(fields: [modifiedBy], references: [id])
+  description String?
+  action MeetingHistoryAction
+  modifiedAt DateTime @default(now())
+}
+
+model Room {
+  id String @id @default(uuid())
+  floorId String
+  floor Floor @relation(fields: [floorId], references: [id])
+  buildingId String
+  building Building @relation(fields: [buildingId], references: [id])
+  imageUrl String?
+  name String @unique @db.VarChar(255)
+  type RoomType @default(meeting)
+  capacity Int
+  amenities String[]
+  availableHours Json
+  description String?
+  status RoomStatus @default(active)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  
+  bookings Booking[]
+  recurrenceBookings RecurrenceBooking[]
+}
+
+model Building {
+  id String @id @default(uuid())
+  name String @unique @db.VarChar(255)
+  totalFloors Int
+  address String
+  description String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @default(now()) @updatedAt
+
+  floors Floor[]
+  rooms Room[]
+}
+
+model Floor {
+  id String @id @default(uuid())
+  buildingId String
+  building Building @relation(fields: [buildingId], references: [id])
+  floorNumber Int
+  name String? @db.VarChar(255)
+  description String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  rooms Room[]
+}
+
+model Notification {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  bookingId String?
+  booking Booking? @relation(fields: [bookingId], references: [id]) 
+  meetingId String?
+  meeting Meeting? @relation(fields: [meetingId], references: [id])
+  message String
+  type String @db.VarChar(255)
+  isRead Boolean @default(false)
+  createdAt DateTime @default(now())
+
+}
+
+model Report {
+  id String @id @default(uuid())
+  generatedBy String
+  user User @relation(fields: [generatedBy], references: [id])
+  bookingId String?
+  booking Booking? @relation(fields: [bookingId], references: [id]) 
+  meetingId String?
+  meeting Meeting? @relation(fields: [meetingId], references: [id])
+  data Json
+  type String @db.VarChar(255)
+  createdAt DateTime @default(now())
+}
+
+model SystemLog {
+  id  String @id @default(uuid())
+  actor String
+  user User @relation(fields: [actor], references: [id])
+  action String
+  description String?
+  createdAt DateTime @default(now())
+}
