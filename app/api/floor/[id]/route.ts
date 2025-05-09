@@ -3,8 +3,10 @@
 import { prisma } from "@/lib/prisma";
 import { FloorUpdateSchema } from "@/lib/validations/floor";
 import { NextRequest, NextResponse } from "next/server";
-import { HandleZodError } from "@/app/lib/validationError";
-import { convertDatesToPhnomPenhTimezone } from "@/app/lib/convertTimestamps";
+import { HandleZodError } from "@/lib/validationError";
+import { convertDatesToPhnomPenhTimezone } from "@/lib/convertTimestamps";
+import { getRoomName } from "@/lib/generateRoomName";
+import { getFloorLabel } from "@/lib/generateFloorLabel";
 
 // Update floor
 export async function PATCH(
@@ -16,73 +18,134 @@ export async function PATCH(
     const body = await request.json();
     const data = FloorUpdateSchema.parse(body);
     const { floorNumber, totalRooms, name } = data;
-    const floor = await prisma.floor.findUnique({ where: { id } });
+    const floor = await prisma.floor.findUnique({
+      where: { id },
+      select: { buildingId: true, floorNumber: true },
+    });
 
-    if (!floor) {
-      return NextResponse.json({ error: "Floor not found" }, { status: 404 });
-    }
+    if (!floor)
+      return NextResponse.json(
+        { error: "Floor does not exist" },
+        { status: 400 }
+      );
 
-    // If the floor number is changing, ensure there isn’t a duplicate in the same building
+    // Check for floorNumber conflicts
     if (typeof floorNumber === "number") {
       const existingFloor = await prisma.floor.findFirst({
         where: { buildingId: floor.buildingId, floorNumber },
       });
-
       if (existingFloor) {
         return NextResponse.json(
-          { error: `Error updating floor: floor number ${floorNumber} already exists in this building` },
+          {
+            error: `Error updating floor: floor ${floorNumber} already exist in this building`,
+          },
           { status: 400 }
         );
       }
     }
 
+    // Check for name conflicts
     if (typeof name === "string") {
       const existingName = await prisma.floor.findFirst({
-        where: { buildingId: floor.buildingId, name },
+        where: { name, NOT: { id } },
       });
-
       if (existingName) {
         return NextResponse.json(
-          { error: `Error updating floor: This name ${name} already exists in this building` },
+          { error: `Error updating floor: The name '${name}' already exists` },
           { status: 400 }
         );
       }
     }
 
-    const updatedFloor = await prisma.floor.update({ where: { id }, data });
+    // Handle room regeneration if totalRooms is provided
+    if (typeof totalRooms === "number") {
+      const rooms = await prisma.room.findMany({
+        where: { floorId: id },
+        select: { id: true, bookings: { select: { id: true } } },
+      });
 
-    //
-    // const defaultAvailableHours = {
-    //   monday: [{ start: "08:00", end: "17:00" }],
-    //   tuesday: [{ start: "08:00", end: "17:00" }],
-    //   wednesday: [{ start: "08:00", end: "17:00" }],
-    //   thursday: [{ start: "08:00", end: "17:00" }],
-    //   friday: [{ start: "08:00", end: "17:00" }],
-    //   saturday: [],
-    //   sunday: [],
-    // };
-    // const defaultAmenities = ["projector", "whiteboard", "air-conditioned"];
-    // const roomData = Array.from({ length: totalRooms }).map((_, i) => ({
-    //   name: `Room ${i + 1}`,
-    //   floorId: id,
-    //   type: "meeting",
-    //   capacity: 10,
-    //   amenities: defaultAmenities,
-    //   availableHours: defaultAvailableHours,
-    //   status: "active",
-    // }));
-    // await prisma.$transaction(
-    //   roomData.map(data => prisma.room.create({ data }))
-    // );
+      const haveBooking = rooms.some((room) => room.bookings.length > 0);
+      if (haveBooking)
+        return NextResponse.json(
+          { error: "Cannot adjust rooms: some rooms contain bookings" },
+          { status: 400 }
+        );
 
-    // Return success response with the updated floor (with dates converted to Phnom Penh timezone)
-    return NextResponse.json(
-      {
-        message: "Floor updated successfully",
-        floor: convertDatesToPhnomPenhTimezone(updatedFloor),
-      },
-      { status: 201 }
-    );
+      // Delete old rooms
+      await prisma.room.deleteMany({ where: { floorId: id } });
+
+      // Get building name for room naming
+      const building = await prisma.building.findUnique({
+        where: { id: floor.buildingId },
+        select: { name: true },
+      });
+
+      const newFloorNumber =
+        typeof floorNumber === "number" ? floorNumber : floor.floorNumber;
+
+      const defaultAvailableHours = {
+        monday: [{ start: "08:00", end: "17:00" }],
+        tuesday: [{ start: "08:00", end: "17:00" }],
+        wednesday: [{ start: "08:00", end: "17:00" }],
+        thursday: [{ start: "08:00", end: "17:00" }],
+        friday: [{ start: "08:00", end: "17:00" }],
+        saturday: [],
+        sunday: [],
+      };
+      const defaultAmenities = ["projector", "whiteboard", "air-conditioned"];
+
+      const roomData = Array.from({ length: totalRooms }).map((_, i) => ({
+        name: getRoomName(building!.name, newFloorNumber, i),
+        floorId: id,
+        type: "meeting",
+        capacity: 10,
+        amenities: defaultAmenities,
+        availableHours: defaultAvailableHours,
+        status: "active",
+      }));
+
+      await prisma.$transaction(
+        roomData.map((data) => prisma.room.create({ data }))
+      );
+
+      // Update totalRooms in building
+      const totalRoomsInBuilding = await prisma.room.count({
+        where: {
+          floor: {
+            buildingId: floor.buildingId,
+          },
+        },
+      });
+
+      await prisma.building.update({
+        where: { id: floor.buildingId },
+        data: { totalRooms: totalRoomsInBuilding },
+      });
+
+      // Prepare update data. If floorNumber is provided, update the label accordingly.
+      let updateData = { ...data, label: getFloorLabel(newFloorNumber) };
+
+      const updatedFloor = await prisma.floor.update({
+        where: { id },
+        data: updateData,
+      });
+
+      // If the updated floorNumber is 0, update the building record to set hasGroundFloor to true.
+      if (typeof floorNumber === "number" && floorNumber === 0) {
+        await prisma.building.update({
+          where: { id: floor.buildingId },
+          data: { hasGroundFloor: true },
+        });
+      }
+
+      return NextResponse.json(
+        {
+          message: "Floor was updated successfully",
+          floor: convertDatesToPhnomPenhTimezone(updatedFloor),
+        },
+        { status: 200 }
+      );
+    }
   } catch (error) {
     return HandleZodError(error);
   }
@@ -131,9 +194,9 @@ export async function DELETE(
 ) {
   const { id } = params;
   try {
-    const floor = await prisma.floor.findUnique({ 
-      where: { id }, 
-      select: { rooms: true, buildingId: true } 
+    const floor = await prisma.floor.findUnique({
+      where: { id },
+      select: { rooms: true, buildingId: true },
     });
 
     if (!floor) {
@@ -143,7 +206,7 @@ export async function DELETE(
     // Check if floor contain rooms
     if (floor.rooms.length > 0) {
       return NextResponse.json(
-        { error: "Cannot deleteThis floor contain rooms" },
+        { error: "Cannot delete floor: it contain rooms" },
         { status: 400 }
       );
     }
@@ -161,7 +224,7 @@ export async function DELETE(
     const floors = await prisma.floor.findMany();
     return NextResponse.json(
       {
-        message: "Floor deleted successfully",
+        message: "Floor was deleted successfully",
         floor: convertDatesToPhnomPenhTimezone(floors),
       },
       { status: 200 }

@@ -6,9 +6,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { convertDatesToPhnomPenhTimezone } from "@/lib/convertTimestamps";
 import { HandleZodError } from "@/lib/validationError";
 import { getFloorLabel } from "@/lib/generateFloorLabel";
-import { toTitleCase } from "@/lib/toTitleCase";
+import { toTitleCase } from "@/app/lib/getTitleCase";
 
-// Get building by id
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -24,27 +23,26 @@ export async function GET(
             floorNumber: true,
             totalRooms: true,
             label: true,
-            rooms: {
-              select: { id: true },
-            },
+            rooms: { select: { id: true } },
           },
           orderBy: { floorNumber: "asc" },
         },
       },
     });
 
-    if (!building)
+    if (!building) {
       return NextResponse.json(
-        { error: "Building cannot found" },
+        { error: "Building not found" },
         { status: 404 }
       );
+    }
 
     return NextResponse.json(
       { building: convertDatesToPhnomPenhTimezone(building) },
       { status: 200 }
     );
   } catch (error) {
-    console.error("Error fetching building: ", error);
+    console.error("Error fetching building:", error);
     return NextResponse.json(
       { error: "Failed to fetch building" },
       { status: 500 }
@@ -69,8 +67,8 @@ export async function DELETE(
 
     if (!building)
       return NextResponse.json(
-        { error: "Building does not exist" },
-        { status: 400 }
+        { error: "Building not found" },
+        { status: 404 }
       );
 
     // Check if the building has floors
@@ -81,13 +79,10 @@ export async function DELETE(
       );
     }
 
+    // Proceed with deletion
     await prisma.building.delete({ where: { id } });
-    const buildings = await prisma.building.findMany();
     return NextResponse.json(
-      {
-        message: "Building was successfully deleted",
-        building: convertDatesToPhnomPenhTimezone(buildings),
-      },
+      { message: "Building was successfully deleted", deletedId: id },
       { status: 200 }
     );
   } catch (error) {
@@ -109,7 +104,6 @@ export async function PATCH(
     const body = await request.json();
     const data = BuildingUpdateSchema.parse(body);
     const { name, totalFloors, hasGroundFloor } = data;
-
     const existingBuilding = await prisma.building.findUnique({
       where: { id },
       include: {
@@ -120,23 +114,25 @@ export async function PATCH(
       },
     });
 
-    if (!existingBuilding)
+    if (!existingBuilding) {
       return NextResponse.json(
-        { error: "Building does not exist" },
-        { status: 400 }
+        { error: "Building not found" },
+        { status: 404 }
       );
+    }
 
+    // Ensure no room exists on any floor if floor layout needs update
     const hasRoomOnAnyFloor = existingBuilding.floors.some(
       (f) => f.rooms.length > 0
     );
-    
+
     const titleCasedName = name ? toTitleCase(name) : undefined;
     if (titleCasedName) {
       const existingName = await prisma.building.findFirst({
         where: {
           name: {
             equals: titleCasedName,
-            mode: 'insensitive',
+            mode: "insensitive",
           },
           NOT: { id },
         },
@@ -144,16 +140,20 @@ export async function PATCH(
 
       if (existingName) {
         return NextResponse.json(
-          { error: `Cannot update to name '${titleCasedName}': It already exist` },
+          { error: `Cannot update to name '${titleCasedName}': It already exists` },
           { status: 400 }
         );
       }
     }
 
+    // Check if totalFloors or hasGroundFloor has changed
     if (
-      (typeof totalFloors === "number" && totalFloors !== existingBuilding.totalFloors) ||
-      (typeof hasGroundFloor === "boolean" && hasGroundFloor !== existingBuilding.hasGroundFloor)
+      (typeof totalFloors === "number" &&
+        totalFloors !== existingBuilding.totalFloors) ||
+      (typeof hasGroundFloor === "boolean" &&
+        hasGroundFloor !== existingBuilding.hasGroundFloor)
     ) {
+      // Prevent changes if any floor has rooms
       if (hasRoomOnAnyFloor) {
         return NextResponse.json(
           { error: "Cannot change totalFloors or hasGroundFloor because some floors have rooms" },
@@ -161,27 +161,33 @@ export async function PATCH(
         );
       }
 
+      // Determine the final configuration (default to current if not provided)
       const finalHasGround = hasGroundFloor ?? existingBuilding.hasGroundFloor;
       const finalTotalFloors = totalFloors ?? existingBuilding.totalFloors;
 
       // Delete all existing floors first
       await prisma.floor.deleteMany({ where: { buildingId: id } });
+      
+      // Wrap the floor update in a transaction (delete and re-create floors)
+      await prisma.$transaction(async (tx) => {
+        await tx.floor.deleteMany({ where: { buildingId: id } });
 
-      // Regenerate floors with new config
-      const floorData = Array.from({ length: finalTotalFloors }).map((_, i) => {
-        const floorNumber = finalHasGround ? i : i + 1;
-        return {
-          buildingId: id,
-          floorNumber,
-          label: getFloorLabel(floorNumber),
-        };
+        const floorData = Array.from({ length: finalTotalFloors }).map((_, i) => {
+          // Calculate floor number based on whether there's a ground floor
+          const floorNumber = finalHasGround ? i : i + 1;
+          return {
+            buildingId: id,
+            floorNumber,
+            label: getFloorLabel(floorNumber),
+          };
+        });
+
+        // Create new floors
+        for (const floor of floorData) {
+          await tx.floor.create({ data: floor });
+        }
       });
 
-      await prisma.$transaction(
-        floorData.map((data) => prisma.floor.create({ data }))
-      );
-
-      // Update building fields to match the synced state
       data.totalFloors = finalTotalFloors;
       data.hasGroundFloor = finalHasGround;
     }
@@ -190,8 +196,8 @@ export async function PATCH(
       where: { id },
       data: {
         ...data,
-        ...(titleCasedName && { name: titleCasedName })
-      }
+        ...(titleCasedName && { name: titleCasedName }),
+      },
     });
 
     return NextResponse.json(
@@ -202,6 +208,7 @@ export async function PATCH(
       { status: 200 }
     );
   } catch (error: unknown) {
+    console.error("Error updating building:", error);
     return HandleZodError(error);
   }
 }

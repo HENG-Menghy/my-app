@@ -78,7 +78,7 @@ export async function DELETE(request: NextRequest) {
     const floors = await prisma.floor.findMany();
     return NextResponse.json(
       { 
-        message:`${floorIds.length} Floors deleted successfully`,
+        message:`${floorIds.length} Floors was deleted successfully`,
         floor: convertDatesToPhnomPenhTimezone(floors)
       },
       { status: 200 }
