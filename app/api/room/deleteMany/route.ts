@@ -1,11 +1,10 @@
 // @/api/room/deleteMany/route.ts
 
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/db/prisma";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function DELETE(request: NextRequest) {
   try {
-    // The client should send an object with "ids": string[]
     const body = await request.json();
     const { ids } = body;
 
@@ -16,64 +15,80 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Retrieve the rooms to be deleted including their floorId.
-    const roomsToDelete = await prisma.room.findMany({
+    // Fetch rooms including bookings and names
+    const roomsToProcess = await prisma.room.findMany({
       where: { id: { in: ids } },
-      select: { id: true, floorId: true },
+      select: {
+        id: true,
+        name: true,
+        floorId: true,
+        bookings: { select: { id: true } },
+      },
     });
 
-    // Ensure all provided room IDs exist.
-    if (roomsToDelete.length !== ids.length) {
+    if (roomsToProcess.length === 0) {
       return NextResponse.json(
-        { error: "Some room IDs do not exist" },
-        { status: 400 }
+        { error: "None of the provided room IDs exist" },
+        { status: 404 }
       );
     }
 
-    // Create a set of affected floor IDs.
-    const uniqueFloorIds = [
-      ...new Set(roomsToDelete.map((room) => room.floorId)),
-    ];
+    const deletableRooms = roomsToProcess.filter(
+      (room) => room.bookings.length === 0
+    );
+    const blockedRooms = roomsToProcess.filter(
+      (room) => room.bookings.length > 0
+    );
 
-    // (Optional) Fetch floor details so we can update the corresponding buildings.
-    const floors = await prisma.floor.findMany({
-      where: { id: { in: uniqueFloorIds } },
-      select: { id: true, buildingId: true },
-    });
+    const deletedRoomIds = deletableRooms.map((room) => room.id);
+    const deletedRoomNames = deletableRooms.map((room) => room.name);
 
-    // Determine the set of affected building IDs.
-    const uniqueBuildingIds = [...new Set(floors.map((floor) => floor.buildingId))];
+    const skippedRooms = blockedRooms.map((room) => ({
+      name: room.name,
+      reason: "Room contains bookings",
+    }));
 
-    // Bulk delete the rooms.
-    await prisma.room.deleteMany({ where: { id: { in: ids } } });
-
-    // For each affected floor, recalculate the remaining number of rooms.
-    const floorUpdatePromises = uniqueFloorIds.map(async (floorId) => {
-      const roomCountOnFloor = await prisma.room.count({
-        where: { floorId },
+    // Delete only the rooms that can be deleted
+    if (deletedRoomIds.length > 0) {
+      await prisma.room.deleteMany({
+        where: { id: { in: deletedRoomIds } },
       });
-      return prisma.floor.update({
-        where: { id: floorId },
-        data: { totalRooms: roomCountOnFloor },
-      });
-    });
 
-    // For each affected building, recalculate the total number of rooms.
-    const buildingUpdatePromises = uniqueBuildingIds.map(async (buildingId) => {
-      const roomCountInBuilding = await prisma.room.count({
-        where: { floor: { buildingId } },
+      // Update floors affected
+      const floorIds = [...new Set(deletableRooms.map((room) => room.floorId))];
+      const floors = await prisma.floor.findMany({
+        where: { id: { in: floorIds } },
+        select: { id: true, buildingId: true },
       });
-      return prisma.building.update({
-        where: { id: buildingId },
-        data: { totalRooms: roomCountInBuilding },
-      });
-    });
+      const buildingIds = [...new Set(floors.map((floor) => floor.buildingId))];
 
-    // Wait for all updates to finish.
-    await Promise.all([...floorUpdatePromises, ...buildingUpdatePromises]);
+      const floorUpdatePromises = floorIds.map(async (floorId) => {
+        const roomCount = await prisma.room.count({ where: { floorId } });
+        return prisma.floor.update({
+          where: { id: floorId },
+          data: { totalRooms: roomCount },
+        });
+      });
+
+      const buildingUpdatePromises = buildingIds.map(async (buildingId) => {
+        const roomCount = await prisma.room.count({
+          where: { floor: { buildingId } },
+        });
+        return prisma.building.update({
+          where: { id: buildingId },
+          data: { totalRooms: roomCount },
+        });
+      });
+
+      await Promise.all([...floorUpdatePromises, ...buildingUpdatePromises]);
+    }
 
     return NextResponse.json(
-      { message: "Rooms were deleted successfully" },
+      {
+        message: "Room deletion processed",
+        deletedRooms: deletedRoomNames,
+        skippedRooms,
+      },
       { status: 200 }
     );
   } catch (error) {

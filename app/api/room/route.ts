@@ -1,277 +1,413 @@
 // @/api/room/route.ts
 
+import prisma from "@/lib/db/prisma";
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 import { RoomSchema } from "@/lib/validations/room";
-import { HandleZodError } from "@/lib/validationError";
-import { sortAvailableHours } from "@/lib/sortAvailableHours";
-import { convertDatesToPhnomPenhTimezone } from "@/lib/convertTimestamps";
-import { fromZonedTime } from "date-fns-tz";
+import { HandleZodError } from "@/utils/validationError";
+import { LocalToUTC, fromUTCToLocal } from "@/utils/datetime";
+import {
+  defaultAmenities,
+  defaultAvailability,
+  defaultCapacity,
+} from "@/utils/defaultRoomInfo";
+import { getRoomName } from "@/utils/generateRoomName";
+import { normalizeName } from "@/utils/normalizeName";
+import { Prisma } from "@prisma/client";
+import { sortAvailabilityByDay } from "@/utils/sortAvailability";
 
 // CREATE Room
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    let body = await request.json();
+
+    // Apply defaults
+    const availability = body.availability ?? defaultAvailability;
+    body.capacity ??= defaultCapacity;
+    body.amenities =
+      Array.isArray(body.amenities) && body.amenities.length > 0
+        ? body.amenities
+        : defaultAmenities;
+
+    // Temporarily remove availability before schema validation
+    delete body.availability;
+
+    // Validate and parse the request using RoomSchema.
     const data = RoomSchema.parse(body);
-    const { floorId, name } = data;
+    const { floorId } = data;
+
+    // Ensure the provided floor exists and retrieve its buildingId and floorNumber
     const existingFloor = await prisma.floor.findUnique({
       where: { id: floorId },
+      select: { buildingId: true, floorNumber: true },
     });
-    const existingRoomName = await prisma.room.findFirst({ where: { name } });
-    if (!existingFloor)
+    if (!existingFloor) {
       return NextResponse.json(
         { error: "Floor does not exist" },
         { status: 400 }
       );
-    if (existingRoomName)
-      return NextResponse.json(
-        { error: `Cannot create room with name ''${name}': It already exist` },
-        { status: 400 }
-      );
-
-    // Create the room
-    const room = await prisma.room.create({ data });
-
-    // Count updated total rooms on the floor
-    const roomCountOnFloor = await prisma.room.count({
-      where: { floorId: floorId },
-    });
-
-    // Get the buildingId from the floor
-    const floor = await prisma.floor.findUnique({
-      where: { id: floorId },
-      select: { buildingId: true },
-    });
-
-    // Count updated total rooms in the building
-    const roomCountInBuilding = await prisma.room.count({
-      where: { floor: { buildingId: floor?.buildingId } },
-    });
-
-    // Update totalRooms on Floor
-    await prisma.floor.update({
-      where: { id: floorId },
-      data: { totalRooms: roomCountOnFloor },
-    });
-
-    // Update totalRooms on Building
-    if (floor?.buildingId) {
-      await prisma.building.update({
-        where: { id: floor.buildingId },
-        data: { totalRooms: roomCountInBuilding },
-      });
     }
 
-    return NextResponse.json(convertDatesToPhnomPenhTimezone(room), {
-      status: 201,
+    // Retrieve the building details to help generate the room name
+    const building = await prisma.building.findUnique({
+      where: { id: existingFloor.buildingId },
+      select: { name: true },
     });
-  } catch (error) {
+    if (!building) {
+      return NextResponse.json(
+        { error: "Building for floor does not exist" },
+        { status: 400 }
+      );
+    }
+
+    // Count current rooms on this floor to determine the next room number
+    const roomCountOnFloor = await prisma.room.count({
+      where: { floorId },
+    });
+
+    // Process the room name:
+    // If a name is provided, clean it (trim and convert to Title Case) and check for duplicates
+    // If not provided or empty, generate a default room name
+    if (data.name && data.name.trim() !== "") {
+      const cleanedName = normalizeName(data.name);
+      data.name = cleanedName;
+      const duplicateRoom = await prisma.room.findFirst({
+        where: { name: { equals: cleanedName, mode: "insensitive" } },
+      });
+      if (duplicateRoom) {
+        return NextResponse.json(
+          {
+            error: `Cannot create room with name '${cleanedName}': It already exists`,
+          },
+          { status: 400 }
+        );
+      }
+    } else {
+      data.name = getRoomName(
+        building.name,
+        existingFloor.floorNumber,
+        roomCountOnFloor
+      );
+    }
+
+    // Create the room
+    const roomData: Prisma.RoomCreateInput = {
+      floor: {
+        connect: { id: data.floorId },
+      },
+      name: data.name!,
+      imageUrl: data.imageUrl,
+      description: data.description,
+      type: data.type,
+      status: data.status,
+      capacity: data.capacity!,
+      amenities: data.amenities!,
+      availability: {
+        create: availability.map((slot: any) => ({
+          dayOfWeek: slot.dayOfWeek,
+          startTime: slot.startTime,
+          endTime: slot.endTime,
+          isAvailable:
+            slot.isAvailable ?? (slot.startTime !== "" && slot.endTime !== ""),
+        })),
+      },
+    };
+
+    const room = await prisma.room.create({
+      data: roomData,
+      include: {
+        availability: {
+          select: {
+            dayOfWeek: true,
+            startTime: true,
+            endTime: true,
+          },
+        },
+      },
+    });
+
+    // Update room counts on the floor
+    const newRoomCountOnFloor = await prisma.room.count({
+      where: { floorId },
+    });
+    await prisma.floor.update({
+      where: { id: floorId },
+      data: { totalRooms: newRoomCountOnFloor },
+    });
+
+    // Update room counts in the entire building
+    const floorsInBuilding = await prisma.floor.findMany({
+      where: { buildingId: existingFloor.buildingId },
+      select: { id: true },
+    });
+    const allFloorIds = floorsInBuilding.map((f) => f.id);
+    const newRoomCountInBuilding = await prisma.room.count({
+      where: { floorId: { in: allFloorIds } },
+    });
+    await prisma.building.update({
+      where: { id: existingFloor.buildingId },
+      data: { totalRooms: newRoomCountInBuilding },
+    });
+
+    return NextResponse.json(
+      {
+        message: "Room was created successfully",
+        room: {
+          ...room,
+          availability: sortAvailabilityByDay(room.availability),
+          createdAt: fromUTCToLocal(room.createdAt).toFormat('yyyy LLL dd hh:mm:ss a'),
+          updatedAt: fromUTCToLocal(room.updatedAt).toFormat('yyyy LLL dd hh:mm:ss a'),
+        },
+      },
+      { status: 201 }
+    );
+  } catch (error: unknown) {
+    console.error("Room creation error:", error);
     return HandleZodError(error);
   }
 }
 
-// GET all rooms
-export async function GET() {
-  try {
-    const rooms = await prisma.room.findMany({
-      include: {
-        floor: {
-          select: {
-            id: true,
-            floorNumber: true,
-            building: {
-              select: {
-                id: true,
-                name: true,
-                address: true,
-              },
-            },
-          },
-        },
-      },
-      orderBy: { name: "asc" },
-    });
-
-    // Sort availableHours before sending response
-    const sortedRooms = rooms.map((room) => ({
-      ...room,
-      availableHours: sortAvailableHours(room.availableHours),
-    }));
-
-    return NextResponse.json(convertDatesToPhnomPenhTimezone(sortedRooms), {
-      status: 200,
-    });
-  } catch (error) {
-    console.error("Error fetching rooms:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch rooms" },
-      { status: 500 }
-    );
-  }
-}
-
-// DELETE all rooms
+// DELETE all rooms within floor or building and skips rooms that have overlapping bookings
 export async function DELETE(request: NextRequest) {
   try {
-    // Parse query parameters from the request URL
     const { searchParams } = new URL(request.url);
     const buildingId = searchParams.get("buildingId");
     const floorId = searchParams.get("floorId");
-    const amenities = searchParams.getAll("amenities");
-    const capacity = searchParams.get("capacity");
-    const roomType = searchParams.get("type");
-    const roomStatus = searchParams.get("status");
-    const dateStr = searchParams.get("date"); // expected format: YYYY-MM-DD
-    const startTimeStr = searchParams.get("startTime"); // expected format: HH:MM
-    const endTimeStr = searchParams.get("endTime"); // expected format: HH:MM
 
-    // Build a dynamic filter for the room query based on provide query parameters
+    // Ensure exactly one of buildingId or floorId is provided
+    if (!floorId && !buildingId) {
+      return NextResponse.json(
+        { error: "Either floorId or buildingId must be provided." },
+        { status: 400 }
+      );
+    }
+
+    if (floorId && buildingId) {
+      return NextResponse.json(
+        { error: "Provide only one: either floorId or buildingId, not both." },
+        { status: 400 }
+      );
+    }
+
+    // Build the base filter
     const filter: Record<string, any> = {};
-    // If floorId is provided, limit to that floor; otherwise, if buildingId is provided, filter by the building of the floor
     if (floorId) {
       filter.floorId = floorId;
-    } else if (buildingId) {
-      filter.floor = { buildingId: buildingId };
+    } else {
+      filter.floor = { buildingId };
     }
 
-    if (capacity) {
-      filter.capacity.lte = parseInt(capacity, 10);
-    }
-
-    if (roomType) {
-      filter.roomType = roomType;
-    }
-
-    if (roomStatus) {
-      filter.roomStatus = roomStatus;
-    }
-
-    // For amenities, we assume that the room model has an array column and we want to require every amenity listed
-    if (amenities && amenities.length > 0) {
-      filter.amenities = { hasEvery: amenities };
-    }
-
-    // Fetch all candidate rooms matching the filter
-    // We also select the 'floor' relationship (to know buildingId) for later updates
+    // Fetch all rooms to consider
     const candidateRooms = await prisma.room.findMany({
       where: filter,
       select: {
         id: true,
+        name: true,
         floorId: true,
         floor: { select: { buildingId: true } },
       },
     });
 
-    // Prepare arrays for result tracking
-    const deletedRoomIds: string[] = [];
-    const skippedRoomIds: string[] = [];
-
-    // If date, startTime, and endTime are provided, then prepare datetime objects
-    const timeZone = "Asia/Phnom_Penh";
-    let startDateTime: Date | null = null;
-    let endDateTime: Date | null = null;
-    if (dateStr && startTimeStr && endTimeStr) {
-      const startDateTimeString = `${dateStr}T${startTimeStr}:00`;
-      const endDateTimeString = `${dateStr}T${endTimeStr}:00`;
-      startDateTime = fromZonedTime(startDateTimeString, timeZone);
-      endDateTime = fromZonedTime(endDateTimeString, timeZone);
+    if (candidateRooms.length === 0) {
+      return NextResponse.json(
+        { message: "No rooms found matching criteria" },
+        { status: 404 }
+      );
     }
 
-    // Loop over candidate rooms and check for overlapping bookings if necessary
+    const deletedRooms: string[] = [];
+    const skippedRooms: { name: string; reason: string }[] = [];
+    const deletableRoomIds: string[] = [];
+
+    // Check if each room has any bookings
     for (const room of candidateRooms) {
-      let hasOverlappingBooking = false;
+      const hasAnyBookings = await prisma.booking.findFirst({
+        where: { roomId: room.id },
+        select: { id: true },
+      });
 
-      if (startDateTime && endDateTime) {
-        // Look for bookings that overlap the specified time range
-        // The overlap check uses the condition: booking.startTime < deletionPeriodEnd AND booking.endTime > deletionPeriodStart.
-        const overlappingBooking = await prisma.booking.findFirst({
-          where: {
-            roomId: room.id,
-            AND: [
-              { startDateTime: { lt: endDateTime } },
-              { endDateTime: { gt: startDateTime } },
-            ],
-          },
+      if (hasAnyBookings) {
+        skippedRooms.push({
+          name: room.name!,
+          reason: "Room contains one or more bookings",
         });
-        if (overlappingBooking) {
-          hasOverlappingBooking = true;
-        }
-      }
-
-      // Based on the availability check, decide whether to delete or skip the room
-      if (hasOverlappingBooking) {
-        skippedRoomIds.push(room.id);
       } else {
-        deletedRoomIds.push(room.id);
+        deletableRoomIds.push(room.id);
+        deletedRooms.push(room.name!);
       }
     }
 
-    // Wrap deletions and subsequent updates in a transaction to maintain data consistency
-    if (deletedRoomIds.length > 0) {
+    if (deletableRoomIds.length > 0) {
       await prisma.$transaction(async (tx) => {
-        // Delete eligible rooms using a deleteMany operation.
-        await tx.room.deleteMany({
-          where: { id: { in: deletedRoomIds } },
-        });
+        // Delete the rooms
+        await tx.room.deleteMany({ where: { id: { in: deletableRoomIds } } });
 
-        // Update room counts on affected floors
-        // Extract unique floorIds from the deleted rooms
-        const floorIds = candidateRooms
-          .filter((r) => deletedRoomIds.includes(r.id))
-          .map((r) => r.floorId);
-        const uniqueFloorIds = Array.from(new Set(floorIds));
+        // Update totalRooms on affected floors
+        const floorIds = [
+          ...new Set(
+            candidateRooms
+              .filter((room) => deletableRoomIds.includes(room.id))
+              .map((room) => room.floorId)
+          ),
+        ];
 
-        // Update each floor's totalRooms count
-        for (const fId of uniqueFloorIds) {
-          const roomCount = await tx.room.count({
-            where: { floorId: fId },
-          });
+        for (const floorId of floorIds) {
+          const roomCount = await tx.room.count({ where: { floorId } });
           await tx.floor.update({
-            where: { id: fId },
+            where: { id: floorId },
             data: { totalRooms: roomCount },
           });
         }
 
-        // Now update the room counts on affected buildings.
-        const buildingIds: string[] = [];
-        // Collect buildingIds from each affected floor.
-        for (const fId of uniqueFloorIds) {
-          const floorData = await tx.floor.findUnique({
-            where: { id: fId },
-            select: { buildingId: true },
-          });
-          if (
-            floorData?.buildingId &&
-            !buildingIds.includes(floorData.buildingId)
-          ) {
-            buildingIds.push(floorData.buildingId);
-          }
-        }
+        // Update totalRooms on affected buildings
+        const buildingIds = [
+          ...new Set(
+            candidateRooms
+              .filter((room) => deletableRoomIds.includes(room.id))
+              .map((room) => room.floor.buildingId)
+          ),
+        ];
 
-        // For each building, recalculate the total rooms scope
-        for (const bId of buildingIds) {
+        for (const buildingId of buildingIds) {
           const roomCount = await tx.room.count({
-            where: { floor: { buildingId: bId } },
+            where: { floor: { buildingId } },
           });
           await tx.building.update({
-            where: { id: bId },
+            where: { id: buildingId },
             data: { totalRooms: roomCount },
           });
         }
       });
     }
 
-    // Build a summary response message.
-    const message = `Operation complete: deleted ${deletedRoomIds.length} room(s) and skipped ${skippedRoomIds.length} room(s) due to overlapping bookings.`;
-
     return NextResponse.json(
-      { deletedRoomIds, skippedRoomIds, message },
+      {
+        message: `Deleted ${deletedRooms.length} room(s), skipped ${skippedRooms.length} room(s).`,
+        deletedRooms,
+        skippedRooms,
+      },
       { status: 200 }
     );
   } catch (error) {
-    console.log(error);
+    console.error("Room bulk deletion error:", error);
     return NextResponse.json(
       { error: "Failed to delete rooms" },
+      { status: 500 }
+    );
+  }
+}
+
+// GET rooms by filtering/searching
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const buildingId = searchParams.get("buildingId");
+    const floorId = searchParams.get("floorId");
+    const roomName = searchParams.get("name")?.toLowerCase();
+    const amenity = searchParams.get("amenities");
+    const capacity = searchParams.get("capacity");
+    const roomType = searchParams.get("type");
+    const roomStatus = searchParams.get("status");
+    const startDateTimeString = searchParams.get("from");
+    const endDateTimeString = searchParams.get("to");
+
+    // Time filtering setup
+    let startDateTime: Date | null = null;
+    let endDateTime: Date | null = null;
+
+    if (startDateTimeString && endDateTimeString) {
+      startDateTime = LocalToUTC(startDateTimeString);
+      endDateTime = LocalToUTC(endDateTimeString);
+    }
+
+    // Build initial room filter
+    const filter: Record<string, any> = {};
+
+    if (floorId) {
+      filter.floorId = floorId;
+    } else if (buildingId) {
+      filter.floor = { buildingId };
+    }
+
+    if (roomName?.trim()) {
+      filter.name = { contains: roomName.trim(), mode: "insensitive" };
+    }
+
+    if (capacity) {
+      filter.capacity = { gte: parseInt(capacity) };
+    }
+
+    if (roomType) {
+      filter.type = roomType;
+    }
+
+    if (roomStatus) {
+      filter.status = roomStatus;
+    }
+
+    if (amenity?.trim()) {
+      filter.amenities = { has: amenity.trim() };
+    }
+
+    const include = {
+      floor: {
+        select: {
+          id: true,
+          floorNumber: true,
+          building: { select: { id: true, name: true } },
+        },
+      },
+      ...(startDateTime &&
+        endDateTime && {
+          bookings: {
+            where: {
+              startDateTime: { lt: endDateTime },
+              endDateTime: { gt: startDateTime },
+            },
+            select: { id: true },
+          },
+        }),
+    } as const;
+
+    const candidateRooms: Prisma.RoomGetPayload<{
+      include: typeof include;
+    }>[] = await prisma.room.findMany({
+      where: filter,
+      include,
+      orderBy: { capacity: "asc" },
+    });
+
+    // Filter out rooms with conflicting bookings
+    const availableRooms = candidateRooms.filter((room) => {
+      if (startDateTime && endDateTime) {
+        return room.bookings.length === 0;
+      }
+      return true;
+    });
+
+    return NextResponse.json(
+      {
+        total: availableRooms.length,
+        availableRooms: availableRooms.map((room) => ({
+          id: room.id,
+          imageUrl: room.imageUrl,
+          name: room.name,
+          capacity: room.capacity,
+          type: room.type,
+          status: room.status,
+          amenities: room.amenities,
+          floor: {
+            id: room.floor.id,
+            floorNumber: room.floor.floorNumber,
+            building: room.floor.building,
+          },
+        })),
+      },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error("Room search failed:", error);
+    return NextResponse.json(
+      { error: "Failed to filter rooms" },
       { status: 500 }
     );
   }

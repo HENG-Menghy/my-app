@@ -4,6 +4,13 @@
   --background: #0f0f0f;
   --foreground: #ffffff;
   --primary-color: #3ecf8e;
+  --pending-color: #f5a623;
+  --deleting-color: #e63946;
+
+  /* Hover States */
+  --primary-hover: #2eaf76;
+  --pending-hover: #d88f1d;
+  --deleting-hover: #c32f39;
 }
 html {
   scroll-behavior: smooth;

@@ -10,7 +10,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 enum UserRole {
-  guest 
   user // default
   admin
 }
@@ -19,6 +18,12 @@ enum UserGender {
   male
   female
   other
+}
+
+enum UserStatus {
+  pending
+  active
+  suspended
 }
 
 enum RoomStatus {
@@ -62,18 +67,43 @@ enum MeetingHistoryAction {
   cancelled
 }
 
+enum AuthEventType {
+  REGISTER
+  LOGIN
+  LOGOUT
+  PASSWORD_CHANGE
+  PASSWORD_RESET
+  ACCOUNT_LOCKED
+  TOKEN_REFRESH
+  TOKEN_REUSED
+  SESSION_EXPIRED
+}
+
+enum AuthEventStatus {
+  success
+  failure
+}
+
 model User {
   id String @id @default(uuid())
   email String @unique @db.VarChar(255)
-  hashedpassword String @db.VarChar(255)
+  password String @db.VarChar(255)
   phonenumber String @unique @db.VarChar(255)
   fullname String @db.VarChar(255)
+  role UserRole @default(user)
   gender UserGender
   imageUrl String?
-  role UserRole @default(user)
-  isDeleted Boolean @default(false)
+
+  // Account status
+  status UserStatus @default(pending)
+  emailVerified DateTime?
+
+  // Security
+  lastLoginAt DateTime?
+  passwordChangedAt DateTime?
+
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   bookings   Booking[]  @relation(name: "UserBookings")
   approvedBy Booking[]  @relation(name: "ApprovedByUser")
@@ -85,45 +115,35 @@ model User {
   meetingHistories MeetingHistory[] 
   notifications Notification[]
   reports Report[]
-  systemLogs SystemLog[]
 
-  accounts Account[]
+  authEvents AuthEvent[]
   sessions Session[]
 }
 
-model Account {
-  id                String   @id @default(uuid())
-  userId            String
-  type              String
-  provider          String
-  providerAccountId String
-  access_token      String?
-  refresh_token     String?
-  expires_at        Int?
-  scope             String?
-  id_token          String?
-  token_type        String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+model AuthEvent {
+  id String @id @default(uuid())
+  type AuthEventType
+  status AuthEventStatus @default(success)
+  createdAt DateTime @default(now())
 
-  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String 
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+ 
+ sessions Session[]
 }
 
 model Session {
-  id             String   @id @default(uuid())
-  sessionToken   String   @unique
-  userId         String
-  expires        DateTime
-  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-}
-
-model EmailOtpVerification {
-  id        String   @id @default(uuid())
-  email     String
-  otpCode   String
-  expiresAt DateTime
-  used      Boolean  @default(false)
+  id String @id @default(uuid())
+  invalidated Boolean @default(false)
   createdAt DateTime @default(now())
+  lastActiveAt DateTime @default(now())
+  expiresAt DateTime?
+  metadata Json
+
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId String
+  authEvent AuthEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 }
 
 model Booking {
@@ -149,7 +169,7 @@ model Booking {
   status BookingStatus @default(pending)
   isDeleted Boolean @default(false)
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   meeting Meeting? @relation(name: "BookingId")
   reference Meeting? @relation(name: "referenceCode")
@@ -175,7 +195,7 @@ model RecurrenceBooking {
   endTime String
   isActive Boolean @default(true)
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
 
   bookings Booking[]
 }
@@ -193,7 +213,7 @@ model Meeting {
   status MeetingStatus 
   isDeleted Boolean @default(false)
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
   
   histories  MeetingHistory[]
   notifications Notification[]
@@ -214,7 +234,7 @@ model MeetingHistory {
 model Room {
   id String @id @default(uuid())
   floorId String
-  floor Floor @relation(fields: [floorId], references: [id])
+  floor Floor @relation(fields: [floorId], references: [id], onDelete: Cascade)
   imageUrl String?
   name String @unique @db.VarChar(255)
   type RoomType @default(meeting)
@@ -222,12 +242,46 @@ model Room {
   capacity Int
   amenities String[]
   description String?
-  availableHours Json
   createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  updatedAt DateTime @updatedAt
   
   bookings Booking[]
+  availability RoomAvailability[]
   recurrenceBookings RecurrenceBooking[]
+}
+
+model RoomAvailability {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  
+  dayOfWeek String
+  startTime String // "HH:mm"
+  endTime String   // "HH:mm"
+  isAvailable Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([roomId, dayOfWeek])
+}
+
+
+model Floor {
+  id String @id @default(uuid())
+  buildingId String 
+  building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
+  floorNumber Int 
+  totalRooms Int @default(0)
+  name String? @unique @db.VarChar(255)
+  label String? @db.VarChar(255)
+  description String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([buildingId, floorNumber]) // Unique per building
+  @@unique([buildingId, label]) // Only unique per building
+  
+  rooms Room[]
 }
 
 model Building {
@@ -239,27 +293,9 @@ model Building {
   description String?
   hasGroundFloor Boolean @default(false)
   createdAt DateTime  @default(now())
-  updatedAt DateTime  @default(now()) @updatedAt
+  updatedAt DateTime  @updatedAt
 
   floors Floor[]
-}
-
-model Floor {
-  id String @id @default(uuid())
-  buildingId String 
-  building Building @relation(fields: [buildingId], references: [id])
-  floorNumber Int 
-  totalRooms Int @default(0)
-  name String? @unique @db.VarChar(255)
-  label String? @db.VarChar(255)
-  description String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
-  
-  @@unique([buildingId, floorNumber]) // Unique per building
-  @@unique([buildingId, label]) // Only unique per building
-  
-  rooms Room[]
 }
 
 model Notification {
@@ -274,27 +310,17 @@ model Notification {
   type String @db.VarChar(255)
   isRead Boolean @default(false)
   createdAt DateTime @default(now())
-
 }
 
 model Report {
   id String @id @default(uuid())
-  generatedBy String
   user User @relation(fields: [generatedBy], references: [id])
-  bookingId String?
+  generatedBy String
   booking Booking? @relation(fields: [bookingId], references: [id]) 
-  meetingId String?
+  bookingId String?
   meeting Meeting? @relation(fields: [meetingId], references: [id])
+  meetingId String?
   data Json
   type String @db.VarChar(255)
-  createdAt DateTime @default(now())
-}
-
-model SystemLog {
-  id  String @id @default(uuid())
-  actor String
-  user User @relation(fields: [actor], references: [id])
-  action String
-  description String?
   createdAt DateTime @default(now())
 }

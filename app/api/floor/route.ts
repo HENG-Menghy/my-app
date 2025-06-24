@@ -1,45 +1,70 @@
 // @/api/floor/route.ts
 
-import { convertDatesToPhnomPenhTimezone } from "@/lib/convertTimestamps";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/db/prisma";
+import { FormattedDateDisplay } from "@/utils/datetime";
 import { FloorSchema } from "@/lib/validations/floor";
 import { NextRequest, NextResponse } from "next/server";
-import { HandleZodError } from "@/lib/validationError";
-import { getRoomName } from "@/lib/generateRoomName";
-import { getFloorLabel } from "@/lib/generateFloorLabel";
+import { HandleZodError } from "@/utils/validationError";
+import { getRoomName } from "@/utils/generateRoomName";
+import { getFloorLabel } from "@/utils/generateFloorLabel";
+import {
+  defaultAmenities,
+  defaultAvailability,
+  defaultCapacity,
+} from "@/utils/defaultRoomInfo";
 import { z } from "zod";
+import { normalizeName } from "@/utils/normalizeName";
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const data = FloorSchema.parse(body);
-    const { buildingId, floorNumber, totalRooms } = data;
+    const { buildingId, name, floorNumber, totalRooms } = data;
 
     // Check if building exists
     const existingBuilding = await prisma.building.findUnique({
       where: { id: buildingId },
-      select: { name: true, totalRooms: true },
+      select: { name: true, totalRooms: true, hasGroundFloor: true },
     });
 
-    if (!existingBuilding) { 
+    if (!existingBuilding) {
       return NextResponse.json(
-        { error: "Building does not exist" },
-        { status: 400 }
+        { error: "Building not found" },
+        { status: 404 }
       );
     }
 
-    // Check if the floor already exists within the building
+    // Check if the floor number already exists within the building
     const existingFloor = await prisma.floor.findFirst({
       where: { buildingId, floorNumber },
     });
 
     if (existingFloor) {
       return NextResponse.json(
-        {
-          error: `Floor ${floorNumber} already exists in this building`,
-        },
+        { error: `Floor ${floorNumber} already exists in this building` },
         { status: 400 }
       );
+    }
+
+    // Check for existing floor name conflict
+    if (name && name.trim() !== "") {
+      const cleanName = normalizeName(name);
+      const existingName = await prisma.floor.findFirst({
+        where: {
+          name: {
+            equals: cleanName,
+            mode: "insensitive",
+          },
+        },
+      });
+
+      if (existingName) {
+        return NextResponse.json(
+          { error: `Floor name '${name.trim()}' already exists` },
+          { status: 400 }
+        );
+      }
+      data.name = cleanName;
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -48,45 +73,55 @@ export async function POST(request: NextRequest) {
         data: { ...data, label: getFloorLabel(floorNumber) },
       });
 
-      // If totalRooms is provided, create the default rooms
-      if (totalRooms) {
-        const defaultAvailableHours = {
-          monday: [{ start: "08:00", end: "17:00" }],
-          tuesday: [{ start: "08:00", end: "17:00" }],
-          wednesday: [{ start: "08:00", end: "17:00" }],
-          thursday: [{ start: "08:00", end: "17:00" }],
-          friday: [{ start: "08:00", end: "17:00" }],
-          saturday: [],
-          sunday: [],
-        };
-        const defaultAmenities = ["projector", "whiteboard", "air-conditioned"];
-        await tx.room.createMany({
-          data: Array.from({ length: totalRooms }).map((_, i) => ({
-            name: getRoomName(existingBuilding.name, floorNumber, i),
+      for (let i = 0; i < totalRooms; i++) {
+        const roomName = getRoomName(existingBuilding.name, floorNumber, i);
+
+        // Create rooms one-by-one so we can use returned room IDs
+        const room = await tx.room.create({
+          data: {
+            name: roomName,
             floorId: createdFloor.id,
-            type: "meeting",
-            capacity: 10,
+            capacity: defaultCapacity,
             amenities: defaultAmenities,
-            availableHours: defaultAvailableHours,
-            status: "active",
+          },
+        });
+
+        // Create availability records for the room
+        await tx.roomAvailability.createMany({
+          data: defaultAvailability.map((a) => ({
+            roomId: room.id,
+            dayOfWeek: a.dayOfWeek,
+            startTime: a.startTime,
+            endTime: a.endTime,
+            isAvailable: a.startTime !== "",
           })),
         });
       }
 
-      // Update the building's total floors and total rooms count
-      const [totalFloors, totalRoomsInBuilding] = await Promise.all([
-        tx.floor.count({ where: { buildingId } }),
-        tx.room.count({
-          where: { floor: { buildingId } },
-        }),
-      ]);
+      // Get all floors for the building (their IDs and floorNumbers)
+      const floors = await tx.floor.findMany({
+        where: { buildingId },
+        select: { id: true },
+      });
+      const floorIds = floors.map((f) => f.id);
 
-      // Update the building record; if a new floor with number 0 is created, set hasGroundFloor to true
+      // Count all rooms on these floors.
+      const roomCount = await tx.room.count({
+        where: { floorId: { in: floorIds } },
+      });
+
+      // Update the building record
+      // totalFloors represents only numbered floors (e.g. floors 1 to n).
+      const floorCount = floors.length;
+      const newTotalFloors =
+        existingBuilding.hasGroundFloor || floorNumber === 0
+          ? floorCount - 1
+          : floorCount;
       await tx.building.update({
         where: { id: buildingId },
         data: {
-          totalFloors,
-          totalRooms: totalRoomsInBuilding,
+          totalFloors: newTotalFloors,
+          totalRooms: roomCount,
           ...(floorNumber === 0 && { hasGroundFloor: true }),
         },
       });
@@ -97,11 +132,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         message: "Floor created successfully",
-        floor: convertDatesToPhnomPenhTimezone(result),
+        floor: FormattedDateDisplay(result),
       },
       { status: 201 }
     );
   } catch (error: unknown) {
+    console.log("Create floor error: ", error);
     return HandleZodError(error);
   }
 }
@@ -113,15 +149,11 @@ export async function POST(request: NextRequest) {
 export async function GET(request: NextRequest) {
   try {
     const floors = await prisma.floor.findMany({
-      orderBy: [
-        { buildingId: "asc" },
-        { floorNumber: "asc" },
-      ],
+      orderBy: [{ buildingId: "asc" }, { floorNumber: "asc" }],
     });
-    return NextResponse.json(
-      { floors: convertDatesToPhnomPenhTimezone(floors) },
-      { status: 200 }
-    );
+    return NextResponse.json(FormattedDateDisplay(floors), {
+      status: 200,
+    });
   } catch (error) {
     console.error("Error fetching floors:", error);
     return NextResponse.json(
@@ -134,12 +166,12 @@ export async function GET(request: NextRequest) {
 /*
   DELETE /api/floor
   Delete all floors that belong to a specified building,
-  with a guard check to prevent deletion if any floor still has rooms
 */
 export async function DELETE(request: NextRequest) {
   try {
     const body = await request.json();
-    // Validate buildingId format using Zod
+
+    // Validate buildingId format using Zod.
     const buildingIdSchema = z.string().uuid();
     const parseResult = buildingIdSchema.safeParse(body.buildingId);
     if (!parseResult.success) {
@@ -150,48 +182,38 @@ export async function DELETE(request: NextRequest) {
     }
     const buildingId = parseResult.data;
 
-    // Ensure the building exists
-    const building = await prisma.building.findUnique({ where: { id: buildingId } });
+    // Ensure the building exists.
+    const building = await prisma.building.findUnique({
+      where: { id: buildingId },
+    });
     if (!building) {
       return NextResponse.json(
-        { error: "Building does not exist" },
-        { status: 400 }
-      );
-    }
-
-    // Verify that none of the floors in the building have rooms
-    const floorsWithRooms = await prisma.floor.findMany({
-      where: { buildingId },
-      select: { id: true, rooms: true },
-    });
-    const hasRooms = floorsWithRooms.some((floor) => floor.rooms.length > 0);
-    if (hasRooms) {
-      return NextResponse.json(
-        { error: "Cannot delete floors: some floors still have rooms" },
-        { status: 400 }
+        { error: "Building not found" },
+        { status: 404 }
       );
     }
 
     // Delete all floors for the building
-    await prisma.floor.deleteMany({ where: { buildingId } });
-
-    // Update building's totalFloors count after deletion
-    const currentTotalFloors = await prisma.floor.count({
+    await prisma.floor.deleteMany({
       where: { buildingId },
     });
+
+    // After deletion, update the building's totals.
+    // Now there should be no floors, so totalFloors = 0; and similarly, no rooms exist.
     await prisma.building.update({
       where: { id: buildingId },
-      data: { totalFloors: currentTotalFloors },
+      data: { totalFloors: 0, totalRooms: 0, hasGroundFloor: false },
     });
 
-    // Return the floors remaining for the building (should be empty)
+    // Return the remaining floors (should be an empty list)
     const remainingFloors = await prisma.floor.findMany({
       where: { buildingId },
     });
+
     return NextResponse.json(
       {
-        message: `All floors belonging to building ${buildingId} were successfully deleted`,
-        floors: convertDatesToPhnomPenhTimezone(remainingFloors),
+        message: `All floors belonging to building ${buildingId} were successfully deleted.`,
+        remainingFloors,
       },
       { status: 200 }
     );

@@ -1,7 +1,8 @@
 // @/actions/building.ts
 
-import { BuildingSchema, BuildingUpdateSchema } from "@/lib/validations/building";
+import {
+  BuildingSchema,
+  BuildingUpdateSchema,
+} from "@/app/validations/building";
 
-export async function createBuilding(raw: unknown) {
-
-}
+export async function createBuilding() {}

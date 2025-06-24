@@ -1,15 +1,16 @@
-import { prisma } from "@/lib/prisma";
+//  /prisma/seed.ts
 
-async function main() {
+import prisma from "@/lib/db/prisma";
+import z from "zod";
 
-}
+async function main() {}
 
 main()
   .then(async () => {
-    await prisma.$disconnect()
+    await prisma.$disconnect();
   })
   .catch(async (e) => {
-    console.error(e)
-    await prisma.$disconnect()
-    process.exit(1)
-  })
+    console.error(e);
+    await prisma.$disconnect();
+    process.exit(1);
+  });

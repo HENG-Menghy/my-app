@@ -1,20 +1,26 @@
 // @/api/building/route.ts
 
+import prisma from "@/lib/db/prisma";
 import { BuildingSchema } from "@/lib/validations/building";
-import { prisma } from "@/lib/prisma";
 import { NextRequest, NextResponse } from "next/server";
-import { convertDatesToPhnomPenhTimezone } from "@/lib/convertTimestamps";
-import { HandleZodError } from "@/lib/validationError";
-import { getFloorLabel } from "@/lib/generateFloorLabel";
-import { toTitleCase } from "@/app/lib/getTitleCase";
+import { FormattedDateDisplay } from "@/utils/datetime";
+import { HandleZodError } from "@/utils/validationError";
+import { getFloorLabel } from "@/utils/generateFloorLabel";
+import { normalizeName } from "@/utils/normalizeName";
 
 // Create building with auto-generated floors
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const data = BuildingSchema.parse(body);
-    const { name, totalFloors, hasGroundFloor } = data;
-    const titleCaseName = toTitleCase(name);
+    const { name, totalFloors, hasGroundFloor, address } = data;
+
+    // Helper function to clean and format text (trim & remove extra spaces)
+    const cleanText = (text: string) => text.replace(/\s+/g, " ").trim();
+
+    // Normalize building name and address
+    const titleCaseName = normalizeName(name);
+    const cleanAddress = cleanText(address);
 
     // Check for duplicate building name (case-insensitive)
     const existingName = await prisma.building.findFirst({
@@ -38,21 +44,19 @@ export async function POST(request: NextRequest) {
     const buildingWithFloors = await prisma.$transaction(async (tx) => {
       // Create building
       const building = await tx.building.create({
-        data: { ...data, name: titleCaseName },
+        data: { ...data, name: titleCaseName, address: cleanAddress },
       });
 
       // Determine the starting floor number
       const startingFloor = hasGroundFloor ? 0 : 1;
+      const totalFloorCount = hasGroundFloor ? totalFloors + 1 : totalFloors;
 
       // Auto-generate floor data based on the total number of floors
-      const floorData = Array.from({ length: totalFloors }).map((_, i) => {
-        const floorNumber = startingFloor + i;
-        return {
-          buildingId: building.id,
-          floorNumber,
-          label: getFloorLabel(floorNumber),
-        };
-      });
+      const floorData = Array.from({ length: totalFloorCount }).map((_, i) => ({
+        buildingId: building.id,
+        floorNumber: startingFloor + i,
+        label: getFloorLabel(startingFloor + i),
+      }));
 
       // Create floors for the building
       await tx.floor.createMany({ data: floorData });
@@ -62,7 +66,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         message: "Building was successfully created",
-        building: convertDatesToPhnomPenhTimezone(buildingWithFloors),
+        building: FormattedDateDisplay(buildingWithFloors),
       },
       { status: 201 }
     );
@@ -78,10 +82,9 @@ export async function GET() {
     const buildings = await prisma.building.findMany({
       orderBy: { name: "asc" },
     });
-    return NextResponse.json(
-      { buildings: convertDatesToPhnomPenhTimezone(buildings) },
-      { status: 200 }
-    );
+    return NextResponse.json(FormattedDateDisplay(buildings), {
+      status: 200,
+    });
   } catch (error) {
     console.error("Error fetching buildings:", error);
     return NextResponse.json(
@@ -91,32 +94,16 @@ export async function GET() {
   }
 }
 
-// Delete all buildings with a guard check to ensure no floors exist
-export async function DELETE(request: NextRequest) {
+// Delete all buildings
+export async function DELETE(_: NextRequest) {
   try {
-    const buildingWithFloors = await prisma.building.findMany({
-      select: {
-        id: true,
-        floors: { select: { id: true } },
-      },
-    });
-
-    // If any building contains floors, abort the deletion.
-    const hasFloors = buildingWithFloors.some(
-      (building) => building.floors.length > 0
-    );
-    if (hasFloors) {
-      return NextResponse.json(
-        { error: "Cannot delete buildings: some buildings contain floors" },
-        { status: 400 }
-      );
-    }
-
-    // Proceed to delete all buildings.
+    // Delete all buildings
     await prisma.building.deleteMany();
 
+    const buildings = await prisma.building.findMany();
+
     return NextResponse.json(
-      { message: "All buildings were successfully deleted", buildings: [] },
+      { message: "All buildings were successfully deleted", buildings },
       { status: 200 }
     );
   } catch (error) {
