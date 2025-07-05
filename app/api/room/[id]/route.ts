@@ -3,12 +3,11 @@
 import prisma from "@/lib/db/prisma";
 import { NextRequest, NextResponse } from "next/server";
 import { RoomUpdateSchema } from "@/lib/validations/room";
-import { fromUTCToLocal, FormattedDateDisplay } from "@/utils/datetime";
+import { fromUTCToLocal } from "@/utils/datetime";
 import { normalizeName } from "@/utils/normalizeName";
 import { getRoomName } from "@/utils/generateRoomName";
 import { HandleZodError } from "@/utils/validationError";
-import { Prisma } from "@prisma/client";
-import { sortAvailabilityByDay } from "@/utils/sortAvailability";
+import { sortAvailableHours } from "@/utils/sortAvailableHours";
 
 // GET Single Room
 export async function GET(
@@ -27,13 +26,8 @@ export async function GET(
         status: true,
         capacity: true,
         amenities: true,
-        availability: {
-          select: {
-            dayOfWeek: true,
-            startTime: true,
-            endTime: true,
-          },
-        },
+       availableHours: true,
+        description: true,
         createdAt: true,
         updatedAt: true,
         floor: {
@@ -50,36 +44,41 @@ export async function GET(
 
     return NextResponse.json(
       {
+        success: true,
         ...room,
-        availability: sortAvailabilityByDay(room.availability),
+        availability: sortAvailableHours(
+          room.availableHours as {
+            dayOfWeek: string;
+            startTime: string;
+            endTime: string;
+          }[]
+        ),
         createdAt: fromUTCToLocal(room.createdAt).toFormat(
-          "yyyy LLL dd hh:mm:ss a"
+          "yyyy-LLL-dd hh:mm:ss a"
         ),
         updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
-          "yyyy LLL dd hh:mm:ss a"
+          "yyyy-LLL-dd hh:mm:ss a"
         ),
         floor: {
           ...room.floor,
           createdAt: fromUTCToLocal(room.floor.createdAt).toFormat(
-            "yyyy LLL dd hh:mm:ss a"
+            "yyyy-LLL-dd hh:mm:ss a"
           ),
           updatedAt: fromUTCToLocal(room.floor.updatedAt).toFormat(
-            "yyyy LLL dd hh:mm:ss a"
+            "yyyy-LLL-dd hh:mm:ss a"
           ),
           building: {
             ...room.floor.building,
             createdAt: fromUTCToLocal(room.floor.building.createdAt).toFormat(
-              "yyyy LLL dd hh:mm:ss a"
+              "yyyy-LLL-dd hh:mm:ss a"
             ),
             updatedAt: fromUTCToLocal(room.floor.building.updatedAt).toFormat(
-              "yyyy LLL dd hh:mm:ss a"
+              "yyyy-LLL-dd hh:mm:ss a"
             ),
           },
         },
       },
-      {
-        status: 200,
-      }
+      { status: 200 }
     );
   } catch (error) {
     console.error("Error fetching room:", error);
@@ -98,7 +97,7 @@ export async function DELETE(
   try {
     const room = await prisma.room.findUnique({
       where: { id: params.id },
-      select: { floorId: true, bookings: { select: { id: true } } },
+      select: { floorId: true, name: true, bookings: { select: { id: true } } },
     });
     if (!room) {
       return NextResponse.json(
@@ -108,7 +107,7 @@ export async function DELETE(
     }
     if (room.bookings.length > 0) {
       return NextResponse.json(
-        { error: "Cannot delete room: it contain bookings" },
+        { error: "Cannot delete room; it contain bookings" },
         { status: 400 }
       );
     }
@@ -139,7 +138,11 @@ export async function DELETE(
     ]);
 
     return NextResponse.json(
-      { message: "Room was deleted successfully", deletedId: params.id },
+      { 
+        success: true,
+        message: `Room ${room.name} was deleted successfully`, 
+        deletedId: params.id 
+      },
       { status: 200 }
     );
   } catch (error) {
@@ -159,9 +162,8 @@ export async function PATCH(
   try {
     const roomId = params.id;
     const body = await request.json();
-    const parsed = RoomUpdateSchema.parse(body);
-    const { availability, ...roomData } = parsed;
-    const { name, floorId } = roomData;
+    const roomData = RoomUpdateSchema.parse(body);
+    const { name, floorId, availableHours } = roomData;
 
     // Fetch current room details.
     const existingRoom = await prisma.room.findUnique({
@@ -181,7 +183,7 @@ export async function PATCH(
 
     // --- Handle Name Update ---
     if (floorChanged) {
-      // When moving floors:
+      // When moving floor
       if (typeof name === "string" && name.trim() !== "") {
         const cleanedName = normalizeName(name);
         if (cleanedName !== existingRoom.name) {
@@ -235,7 +237,7 @@ export async function PATCH(
         );
       }
     } else {
-      // When not moving floors, handle manual name update
+      // When not moving floor, handle manual name update
       if (typeof name === "string" && name.trim() !== "") {
         const cleanedName = normalizeName(name);
         if (cleanedName !== existingRoom.name) {
@@ -273,58 +275,48 @@ export async function PATCH(
       }
     }
 
-    const updatedRoom = await prisma.$transaction(async (tx) => {
-      const room = await tx.room.update({
-        where: { id: roomId },
-        data: roomData as Prisma.RoomUpdateInput,
-        include: {
-          availability: {
-            select: {
-              dayOfWeek: true,
-              startTime: true,
-              endTime: true,
-            },
-          },
-        },
-      });
-
-      if (availability && availability.length > 0) {
-        for (const a of availability) {
-          await tx.roomAvailability.upsert({
-            where: {
-              roomId_dayOfWeek: {
-                roomId,
-                dayOfWeek: a.dayOfWeek,
-              },
-            },
-            update: {
-              startTime: a.startTime,
-              endTime: a.endTime,
-              isAvailable: a.isAvailable ?? true,
-            },
-            create: {
-              roomId,
-              dayOfWeek: a.dayOfWeek,
-              startTime: a.startTime,
-              endTime: a.endTime,
-              isAvailable: a.isAvailable ?? true,
-            },
-          });
+    if (availableHours && availableHours?.length > 0) {
+      // Create a map from existing for faster look up
+      const hoursMap = new Map<string, any>();
+      const room = await prisma.room.findUnique({ where: { id: roomId } });
+      const oldAvailableHours = room?.availableHours as { dayOfWeek: string; startTime: string; endTime: string }[];
+      for (const entry of oldAvailableHours) {
+        if (entry?.dayOfWeek) {
+          hoursMap.set(entry.dayOfWeek.toLocaleLowerCase(), entry)
         }
       }
 
-      // Return updated room with fresh availability
+      // Apply overrides
+      for (const override of availableHours) {
+        const day = override.dayOfWeek.toLocaleLowerCase();
+        const existing = hoursMap.get(day);
+        hoursMap.set(day, existing ? { ...existing, ...override } : { ...override });
+      }
+      roomData.availableHours = Array.from(hoursMap.values());
+    }
+
+    const updatedRoom = await prisma.$transaction(async (tx) => {
+      await tx.room.update({
+        where: { id: roomId },
+        data: roomData,
+      });
+
+      // Return updated room with fresh availabileHours
       return tx.room.findUnique({
         where: { id: roomId },
-        include: {
-          availability: {
-            select: {
-              dayOfWeek: true,
-              startTime: true,
-              endTime: true,
-              isAvailable: true,
-            },
-          },
+        select: {
+          id: true,
+          floorId: true,
+          imageUrl: true,
+          name: true,
+          type: true,
+          status: true,
+          capacity: true,
+          amenities: true,
+          availableHours: true,
+          description: true,
+          createdAt: true,
+          updatedAt: true,
         },
       });
     });
@@ -372,10 +364,6 @@ export async function PATCH(
         select: { buildingId: true, floorNumber: true },
       });
       if (oldFloorData) {
-        // const oldBuilding = await prisma.building.findUnique({
-        //   where: { id: oldFloorData.buildingId },
-        //   select: { name: true },
-        // });
         // It's common to use a similar query to find the building.
         const buildingData = await prisma.building.findUnique({
           where: { id: oldFloorData.buildingId },
@@ -402,15 +390,22 @@ export async function PATCH(
 
     return NextResponse.json(
       {
-        message: "Room was successfully updated",
+        success: true,
+        message: `Room ${existingRoom.name} was successfully updated`,
         updatedRoom: {
           ...updatedRoom,
-          availability: sortAvailabilityByDay(updatedRoom!.availability),
+          availableHours: sortAvailableHours(
+            updatedRoom!.availableHours as {
+              dayOfWeek: string;
+              startTime: string;
+              endTime: string;
+            }[]
+          ),
           createdAt: fromUTCToLocal(updatedRoom!.createdAt).toFormat(
-            "yyyy LLL dd hh:mm:ss a"
+            "yyyy-LLL-dd hh:mm:ss a"
           ),
           updatedAt: fromUTCToLocal(updatedRoom!.updatedAt).toFormat(
-            "yyyy LLL dd hh:mm:ss a"
+            "yyyy-LLL-dd hh:mm:ss a"
           ),
         },
       },

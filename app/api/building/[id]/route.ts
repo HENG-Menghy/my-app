@@ -3,12 +3,15 @@
 import prisma from "@/lib/db/prisma";
 import { BuildingUpdateSchema } from "@/lib/validations/building";
 import { NextRequest, NextResponse } from "next/server";
-import { FormattedDateDisplay } from "@/utils/datetime";
+import { FormattedDateDisplay, fromUTCToLocal } from "@/utils/datetime";
 import { HandleZodError } from "@/utils/validationError";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
 import { normalizeName } from "@/utils/normalizeName";
+import { getRoomName } from "@/utils/generateRoomName";
+import { defaultRoomValues } from "@/utils/defaultRoomValues";
+import { sortAvailableHours } from "@/utils/sortAvailableHours";
 
-// Get building
+// Get building by id
 export async function GET(
   _: NextRequest,
   { params }: { params: { id: string } }
@@ -19,11 +22,12 @@ export async function GET(
       where: { id },
       include: {
         floors: {
-          include: {
-            rooms: {
-              select: { id: true },
-              orderBy: { name: "asc" },
-            },
+          select: {
+            id: true,
+            floorNumber: true,
+            totalRooms: true,
+            label: true,
+            rooms: { orderBy: { name: "asc" } },
           },
           orderBy: { floorNumber: "asc" },
         },
@@ -37,9 +41,30 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(FormattedDateDisplay(building), {
-      status: 200,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        ...building,
+        createdAt: fromUTCToLocal(building.createdAt).toFormat("yyyy-LLL-dd hh:mm:ss a"),
+        updatedAt: fromUTCToLocal(building.updatedAt).toFormat("yyyy-LLL-dd hh:mm:ss a"),
+        floors: building.floors.map(floor => ({
+          ...floor,
+          rooms: floor.rooms.map(room => ({
+            ...room,
+            availableHours: sortAvailableHours(
+              room.availableHours as {
+                dayOfWeek: string;
+                startTime: string;
+                endTime: string;
+              }[]
+            ),
+            createdAt: fromUTCToLocal(room.createdAt).toFormat("yyyy-LLL-dd hh:mm:ss a"),
+            updatedAt: fromUTCToLocal(room.updatedAt).toFormat("yyyy-LLL-dd hh:mm:ss a"),
+          })),
+        })),
+      },
+      { status: 200 }
+    );
   } catch (error) {
     console.error("Error fetching building:", error);
     return NextResponse.json(
@@ -59,7 +84,7 @@ export async function DELETE(
     // Find the building and related floors and rooms
     const building = await prisma.building.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, name: true },
     });
 
     // Check if the building exists
@@ -74,7 +99,11 @@ export async function DELETE(
     await prisma.building.delete({ where: { id } });
 
     return NextResponse.json(
-      { message: "Building was successfully deleted", deletedId: id },
+      { 
+        success: true,
+        message: `Building ${building.name} was successfully deleted`, 
+        deletedId: id 
+      },
       { status: 200 }
     );
   } catch (error) {
@@ -95,7 +124,17 @@ export async function PATCH(
     const { id } = params;
     const body = await request.json();
     const data = BuildingUpdateSchema.parse(body);
-    const { name, address, totalFloors, hasGroundFloor } = data;
+    const {
+      name,
+      address,
+      totalFloors,
+      hasGroundFloor,
+      description,
+      totalRoomsOnEachFloor,
+      RoomsCapacities,
+      RoomsAmenities,
+      RoomsAvailableHours,
+    } = data;
 
     const existingBuilding = await prisma.building.findUnique({
       where: { id },
@@ -140,6 +179,22 @@ export async function PATCH(
           },
           { status: 400 }
         );
+      } else {
+        // Update all rooms' name when building name is changed
+        for (const floor of existingBuilding.floors) {
+          for (const room of floor.rooms) {
+            const parts = room.name.split("-");
+            parts[0] = titleCasedName
+              .split(" ")
+              .map((w) => w[0])
+              .join("");
+            const updateName = parts.join("-");
+            await prisma.room.update({
+              where: { name: room.name },
+              data: { name: updateName },
+            });
+          }
+        }
       }
     }
 
@@ -149,8 +204,8 @@ export async function PATCH(
         ? hasGroundFloor
         : existingBuilding.hasGroundFloor;
 
-    // Start transaction for floor adjustments and building update
-    const updatedBuilding = await prisma.$transaction(async (tx) => {
+    // Start transaction for floor adjustments, totalRoomsOnEachFloor change, and building update
+    const updateBuilding = await prisma.$transaction(async (tx) => {
       // ─── Ground Floor Addition/Removal ───
       if (
         typeof hasGroundFloor === "boolean" &&
@@ -260,42 +315,127 @@ export async function PATCH(
       }
 
       // ─── Recalculate Building Totals ───
-      // Retrieve the current list of floors in this building.
       const floorsAfter = await tx.floor.findMany({
         where: { buildingId: id },
         select: { id: true, floorNumber: true },
       });
-      const floorIds = floorsAfter.map((f) => f.id);
 
-      // Count only rooms associated with these floors.
-      const roomCount = await tx.room.count({
-        where: { floorId: { in: floorIds } },
+      for (const floor of floorsAfter) {
+        const rooms = await tx.room.findMany({
+          where: { floorId: floor.id },
+          include: { bookings: true },
+          orderBy: { name: "asc" },
+        });
+        const existingCount = rooms.length;
+
+        if (totalRoomsOnEachFloor != null) {
+          if (existingCount < totalRoomsOnEachFloor) {
+            const additional = totalRoomsOnEachFloor - existingCount;
+            const newRoomsData = Array.from({ length: additional }).map(
+              (_, i) => ({
+                floorId: floor.id,
+                name: getRoomName(
+                  titleCasedName ?? existingBuilding.name,
+                  floor.floorNumber,
+                  existingCount + i
+                ),
+                capacity: RoomsCapacities ?? defaultRoomValues.capacities,
+                amenities: RoomsAmenities ?? defaultRoomValues.amenities,
+                availableHours:
+                  RoomsAvailableHours ?? defaultRoomValues.available_hours,
+              })
+            );
+            await tx.room.createMany({ data: newRoomsData });
+          }
+
+          if (existingCount > totalRoomsOnEachFloor) {
+            const excessRooms = rooms
+              .slice(totalRoomsOnEachFloor)
+              .filter((r) => r.bookings.length === 0);
+
+            await tx.room.deleteMany({
+              where: { id: { in: excessRooms.map((r) => r.id) } },
+            });
+          }
+
+          await tx.floor.update({
+            where: { id: floor.id },
+            data: { totalRooms: totalRoomsOnEachFloor },
+          });
+        }
+
+        if (RoomsCapacities || RoomsAmenities || RoomsAvailableHours) {
+          for (const room of rooms) {
+            // Create a map from existing for faster lookup
+            const hoursMap = new Map<string, any>();
+            const overrides = RoomsAvailableHours ?? [];
+            const currrentHours = room.availableHours as {
+              dayOfWeek: string;
+              startTime: string;
+              endTime: string;
+            }[];
+            for (const entry of currrentHours) {
+              if (entry?.dayOfWeek) {
+                hoursMap.set(entry.dayOfWeek.toLowerCase(), entry);
+              }
+            }
+
+            // Apply overrides and ensure all days from override are included
+            for (const override of overrides) {
+              const day = override.dayOfWeek.toLocaleLowerCase();
+              const existing = hoursMap.get(day);
+              hoursMap.set(
+                day,
+                existing ? { ...existing, ...override } : { ...override }
+              );
+            }
+
+            const updatedAvailableHours = Array.from(hoursMap.values());
+
+            await tx.room.update({
+              where: { id: room.id },
+              data: {
+                ...(RoomsCapacities && { capacity: RoomsCapacities }),
+                ...(RoomsAmenities && { amenities: RoomsAmenities }),
+                ...(RoomsAvailableHours && {
+                  availableHours: updatedAvailableHours,
+                }),
+              },
+            });
+          }
+        }
+      }
+
+      const newFloors = await tx.floor.findMany({
+        where: { buildingId: id },
+        select: { id: true },
+      });
+      const totalRooms = await tx.room.count({
+        where: { floorId: { in: newFloors.map((f) => f.id) } },
       });
 
-      // totalFloors in the building model is meant to represent only numbered floors (not including the ground floor).
-      // If effectiveHasGroundFloor is true, subtract one from the total floor count.
-      const newTotalNumberedFloors = effectiveHasGroundFloor
-        ? floorsAfter.length - 1
-        : floorsAfter.length;
-
-      // Update the building record with recalculated totals as well as any updated fields (name, address, etc.)
-      return await tx.building.update({
+      const updatedBuilding = await tx.building.update({
         where: { id },
         data: {
-          ...data, // includes totalFloors (but we'll override it)
           ...(titleCasedName && { name: titleCasedName }),
           ...(cleanedAddress && { address: cleanedAddress }),
-          totalFloors: newTotalNumberedFloors,
-          totalRooms: roomCount,
+          description,
+          totalFloors: effectiveHasGroundFloor
+            ? newFloors.length - 1
+            : newFloors.length,
+          totalRooms,
           hasGroundFloor: effectiveHasGroundFloor,
         },
       });
+
+      return updatedBuilding;
     });
 
     return NextResponse.json(
       {
-        message: "Building was successfully updated",
-        updatedBuilding: FormattedDateDisplay(updatedBuilding),
+        success: true,
+        message: `Building ${existingBuilding.name} was successfully updated`,
+        updatedBuilding: FormattedDateDisplay(updateBuilding),
       },
       { status: 200 }
     );

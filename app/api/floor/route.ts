@@ -7,19 +7,24 @@ import { NextRequest, NextResponse } from "next/server";
 import { HandleZodError } from "@/utils/validationError";
 import { getRoomName } from "@/utils/generateRoomName";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
-import {
-  defaultAmenities,
-  defaultAvailability,
-  defaultCapacity,
-} from "@/utils/defaultRoomInfo";
+import { defaultRoomValues } from "@/utils/defaultRoomValues";
 import { z } from "zod";
 import { normalizeName } from "@/utils/normalizeName";
 
+// CREATE new floor
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const data = FloorSchema.parse(body);
-    const { buildingId, name, floorNumber, totalRooms } = data;
+    const { 
+      buildingId, 
+      name, 
+      floorNumber, 
+      totalRooms,
+      RoomsCapacities,
+      RoomsAmenities,
+      RoomsAvailableHours,
+    } = data;
 
     // Check if building exists
     const existingBuilding = await prisma.building.findUnique({
@@ -70,33 +75,29 @@ export async function POST(request: NextRequest) {
     const result = await prisma.$transaction(async (tx) => {
       // Create the floor with an appropriate label
       const createdFloor = await tx.floor.create({
-        data: { ...data, label: getFloorLabel(floorNumber) },
+        data: {
+          buildingId,
+          name,
+          floorNumber,
+          totalRooms,
+          label: getFloorLabel(floorNumber) 
+        },
       });
 
       for (let i = 0; i < totalRooms; i++) {
         const roomName = getRoomName(existingBuilding.name, floorNumber, i);
 
         // Create rooms one-by-one so we can use returned room IDs
-        const room = await tx.room.create({
+        await tx.room.create({
           data: {
             name: roomName,
             floorId: createdFloor.id,
-            capacity: defaultCapacity,
-            amenities: defaultAmenities,
+            capacity: RoomsCapacities ?? defaultRoomValues.capacities,
+            amenities: RoomsAmenities ?? defaultRoomValues.amenities,
+            availableHours: RoomsAvailableHours ?? defaultRoomValues.available_hours,
           },
         });
-
-        // Create availability records for the room
-        await tx.roomAvailability.createMany({
-          data: defaultAvailability.map((a) => ({
-            roomId: room.id,
-            dayOfWeek: a.dayOfWeek,
-            startTime: a.startTime,
-            endTime: a.endTime,
-            isAvailable: a.startTime !== "",
-          })),
-        });
-      }
+      };
 
       // Get all floors for the building (their IDs and floorNumbers)
       const floors = await tx.floor.findMany({
@@ -131,6 +132,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       {
+        success: true,
         message: "Floor created successfully",
         floor: FormattedDateDisplay(result),
       },
@@ -143,17 +145,21 @@ export async function POST(request: NextRequest) {
 }
 
 /*
-  GET /api/floor
+  GET all floors
   Retrieve all floors, ordering by building and floor number
 */
-export async function GET(request: NextRequest) {
+export async function GET(_: NextRequest) {
   try {
     const floors = await prisma.floor.findMany({
       orderBy: [{ buildingId: "asc" }, { floorNumber: "asc" }],
     });
-    return NextResponse.json(FormattedDateDisplay(floors), {
-      status: 200,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        AllFloors: FormattedDateDisplay(floors),
+      }, 
+      { status: 200 }
+    );
   } catch (error) {
     console.error("Error fetching floors:", error);
     return NextResponse.json(
@@ -164,23 +170,13 @@ export async function GET(request: NextRequest) {
 }
 
 /*
-  DELETE /api/floor
-  Delete all floors that belong to a specified building,
+  DELETE all floors belong to building
 */
 export async function DELETE(request: NextRequest) {
   try {
+    const validBuildingId = z.string().uuid();
     const body = await request.json();
-
-    // Validate buildingId format using Zod.
-    const buildingIdSchema = z.string().uuid();
-    const parseResult = buildingIdSchema.safeParse(body.buildingId);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: "Invalid building id format" },
-        { status: 400 }
-      );
-    }
-    const buildingId = parseResult.data;
+    const buildingId = validBuildingId.parse(body);
 
     // Ensure the building exists.
     const building = await prisma.building.findUnique({
@@ -212,16 +208,14 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json(
       {
-        message: `All floors belonging to building ${buildingId} were successfully deleted.`,
+        success: true,
+        message: `All floors belonging to building ${building.name} were successfully deleted.`,
         remainingFloors,
       },
       { status: 200 }
     );
   } catch (error) {
     console.error("Error deleting floors:", error);
-    return NextResponse.json(
-      { error: "Failed to delete floors" },
-      { status: 500 }
-    );
+    return HandleZodError(error);
   }
 }

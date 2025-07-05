@@ -10,14 +10,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 enum UserRole {
-  user // default
+  user
   admin
 }
 
 enum UserGender {
   male
   female
-  other
 }
 
 enum UserStatus {
@@ -27,17 +26,17 @@ enum UserStatus {
 }
 
 enum RoomStatus {
-  active // default
+  active
   inactive
 }
 
 enum RoomType {
-  meeting // default
+  meeting
   conference
 }
 
 enum BookingStatus {
-  pending // default
+  pending
   approved
   rejected
   cancelled
@@ -48,6 +47,16 @@ enum RecurrencePattern {
   daily
   weekly
   monthly
+}
+
+enum WeekDay {
+  sunday
+  monday
+  tuesday
+  wednesday
+  thursday
+  friday
+  saturday
 }
 
 enum MeetingStatus {
@@ -93,15 +102,10 @@ model User {
   role UserRole @default(user)
   gender UserGender
   imageUrl String?
-
-  // Account status
   status UserStatus @default(pending)
   emailVerified DateTime?
-
-  // Security
   lastLoginAt DateTime?
   passwordChangedAt DateTime?
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -110,9 +114,11 @@ model User {
   bookedBy   Booking[]  @relation(name: "BookedByUser")
   assignedTo Booking[]  @relation(name: "AssignedToUser")
   recurrenceBookings RecurrenceBooking[] 
+
   assignedMeetings  Meeting[]  @relation(name: "AssignedMeetings")
   modifiedMeetings  Meeting[]  @relation(name: "ModifiedMeetings")
   meetingHistories MeetingHistory[] 
+
   notifications Notification[]
   reports Report[]
 
@@ -122,28 +128,25 @@ model User {
 
 model AuthEvent {
   id String @id @default(uuid())
-  type AuthEventType
-  status AuthEventStatus @default(success)
-  createdAt DateTime @default(now())
-
   userId String 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
- 
- sessions Session[]
+  type AuthEventType
+  status AuthEventStatus @default(success) 
+  sessions Session[]
+  createdAt DateTime @default(now())
 }
 
 model Session {
   id String @id @default(uuid())
-  invalidated Boolean @default(false)
-  createdAt DateTime @default(now())
-  lastActiveAt DateTime @default(now())
-  expiresAt DateTime?
-  metadata Json
-
   userId String
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   eventId String
   authEvent AuthEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  invalidated Boolean @default(false)
+  metadata Json
+  expiresAt DateTime?
+  lastActiveAt DateTime @default(now())
+  createdAt DateTime @default(now())
 }
 
 model Booking {
@@ -158,16 +161,16 @@ model Booking {
   approvedByUser User? @relation(name: "ApprovedByUser", fields: [approvedBy], references: [id])
   assignedTo String?
   assignedToUser User? @relation(name: "AssignedToUser", fields: [assignedTo], references: [id])
+  recurrenceId String?
+  recurrence RecurrenceBooking? @relation(fields: [recurrenceId], references: [id])
   code String @unique @db.VarChar(255)
-  titleMeeting String 
-  leaderMeeting String @db.VarChar(255)
+  meetingTitle String 
+  meetingLeader String @db.VarChar(255)
   startDateTime DateTime // Store date + time together
   endDateTime DateTime  // Store date + time together
-  recurrence String?
-  recurrenceBookings RecurrenceBooking? @relation(fields: [recurrence], references: [id])
-  cancellationReason String?
   status BookingStatus @default(pending)
   isDeleted Boolean @default(false)
+  cancellationReason String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -183,12 +186,12 @@ model RecurrenceBooking {
   room Room @relation(fields: [roomId], references: [id])
   createdBy String
   user User @relation(fields: [createdBy], references: [id])
-  titleMeeting String
-  leaderMeeting String @db.VarChar(255)
+  meetingTitle String
+  meetingLeader String @db.VarChar(255)
   pattern RecurrencePattern
   interval Int
-  weekdays String[]
-  dayOfMonth Int?
+  weekdays WeekDay[]
+  dayOfMonth Int[]
   startDate DateTime
   endDate DateTime
   startTime String
@@ -231,40 +234,18 @@ model MeetingHistory {
   modifiedAt DateTime @default(now())
 }
 
-model Room {
+model Building {
   id String @id @default(uuid())
-  floorId String
-  floor Floor @relation(fields: [floorId], references: [id], onDelete: Cascade)
-  imageUrl String?
   name String @unique @db.VarChar(255)
-  type RoomType @default(meeting)
-  status RoomStatus @default(active)
-  capacity Int
-  amenities String[]
+  address String
+  totalFloors Int
+  totalRooms Int? @default(0)
+  hasGroundFloor Boolean @default(false)
   description String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  
-  bookings Booking[]
-  availability RoomAvailability[]
-  recurrenceBookings RecurrenceBooking[]
+  floors Floor[]
 }
-
-model RoomAvailability {
-  id String @id @default(uuid())
-  roomId String
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  
-  dayOfWeek String
-  startTime String // "HH:mm"
-  endTime String   // "HH:mm"
-  isAvailable Boolean @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@unique([roomId, dayOfWeek])
-}
-
 
 model Floor {
   id String @id @default(uuid())
@@ -277,25 +258,56 @@ model Floor {
   description String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  
-  @@unique([buildingId, floorNumber]) // Unique per building
-  @@unique([buildingId, label]) // Only unique per building
-  
   rooms Room[]
+
+  @@unique([buildingId, floorNumber]) // Only unique per building
+  @@unique([buildingId, label]) // Only unique per building
 }
 
-model Building {
+model Room {
   id String @id @default(uuid())
+  floorId String
+  floor Floor @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  imageUrl String?
   name String @unique @db.VarChar(255)
-  totalFloors Int
-  totalRooms Int? @default(0)
-  address String
-  description String?
-  hasGroundFloor Boolean @default(false)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  type RoomType @default(meeting)
+  status RoomStatus @default(active)
+  capacity Int
+  amenities String[]
+  availableHours Json
 
-  floors Floor[]
+  overrides RoomAvailabilityOverride[]
+  bookings Booking[]
+  recurrenceBookings RecurrenceBooking[]
+  
+  description String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RoomAvailabilityGroup {
+  id String @id @default(uuid())  
+  date DateTime
+  isClosed Boolean
+  reason String?
+  rooms RoomAvailabilityOverride[]
+  createdAt DateTime @default(now())
+}
+
+model RoomAvailabilityOverride {
+  id String @id @default(uuid())
+  roomId String
+  room Room @relation(fields: [roomId], references: [id])
+  groupId String
+  group RoomAvailabilityGroup @relation(fields: [groupId], references: [id])
+
+  @@unique([roomId, groupId])
+}
+
+model Holiday {
+  id     String @id @default(uuid())
+  date   DateTime @unique
+  name   String
 }
 
 model Notification {
@@ -314,12 +326,12 @@ model Notification {
 
 model Report {
   id String @id @default(uuid())
-  user User @relation(fields: [generatedBy], references: [id])
   generatedBy String
-  booking Booking? @relation(fields: [bookingId], references: [id]) 
+  user User @relation(fields: [generatedBy], references: [id])
   bookingId String?
-  meeting Meeting? @relation(fields: [meetingId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id]) 
   meetingId String?
+  meeting Meeting? @relation(fields: [meetingId], references: [id])
   data Json
   type String @db.VarChar(255)
   createdAt DateTime @default(now())

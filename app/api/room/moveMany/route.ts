@@ -3,26 +3,18 @@
 import prisma from "@/lib/db/prisma";
 import { NextRequest, NextResponse } from "next/server";
 import { getRoomName } from "@/utils/generateRoomName";
+import { z } from "zod";
+import { HandleZodError } from "@/utils/validationError";
 
 // Move rooms to another floor by floor id
 export async function PATCH(request: NextRequest) {
   try {
+    const validIds = z.object({
+      targetFloorId: z.string().uuid(),
+      roomIds: z.array(z.string().uuid()).nonempty(),
+    }).strict();
     const body = await request.json();
-    const { roomIds, targetFloorId } = body;
-
-    if (!roomIds || !Array.isArray(roomIds) || roomIds.length === 0) {
-      return NextResponse.json(
-        { error: "No room IDs provided" },
-        { status: 400 }
-      );
-    }
-
-    if (!targetFloorId) {
-      return NextResponse.json(
-        { error: "Target floorId is required" },
-        { status: 400 }
-      );
-    }
+    const { roomIds, targetFloorId } = validIds.parse(body);
 
     // Validate target floor
     const targetFloor = await prisma.floor.findUnique({
@@ -190,6 +182,7 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json(
       {
+        success: true,
         message: `${roomsToMove.length} room(s) successfully moved to floor ${targetFloor.floorNumber} of building ${targetBuilding.name}`,
         newMovedRooms: movedRoomNames,
       },
@@ -197,9 +190,6 @@ export async function PATCH(request: NextRequest) {
     );
   } catch (error) {
     console.error("Error moving rooms:", error);
-    return NextResponse.json(
-      { error: "Failed to move rooms" },
-      { status: 500 }
-    );
+    return HandleZodError(error);
   }
 }

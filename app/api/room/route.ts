@@ -5,33 +5,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { RoomSchema } from "@/lib/validations/room";
 import { HandleZodError } from "@/utils/validationError";
 import { LocalToUTC, fromUTCToLocal } from "@/utils/datetime";
-import {
-  defaultAmenities,
-  defaultAvailability,
-  defaultCapacity,
-} from "@/utils/defaultRoomInfo";
+import { defaultRoomValues } from "@/utils/defaultRoomValues";
 import { getRoomName } from "@/utils/generateRoomName";
 import { normalizeName } from "@/utils/normalizeName";
-import { Prisma } from "@prisma/client";
-import { sortAvailabilityByDay } from "@/utils/sortAvailability";
+import { sortAvailableHours } from "@/utils/sortAvailableHours";
+import { z } from "zod";
 
 // CREATE Room
 export async function POST(request: NextRequest) {
   try {
     let body = await request.json();
-
-    // Apply defaults
-    const availability = body.availability ?? defaultAvailability;
-    body.capacity ??= defaultCapacity;
-    body.amenities =
-      Array.isArray(body.amenities) && body.amenities.length > 0
-        ? body.amenities
-        : defaultAmenities;
-
-    // Temporarily remove availability before schema validation
-    delete body.availability;
-
-    // Validate and parse the request using RoomSchema.
     const data = RoomSchema.parse(body);
     const { floorId } = data;
 
@@ -90,38 +73,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Create the room
-    const roomData: Prisma.RoomCreateInput = {
-      floor: {
-        connect: { id: data.floorId },
-      },
-      name: data.name!,
-      imageUrl: data.imageUrl,
-      description: data.description,
-      type: data.type,
-      status: data.status,
-      capacity: data.capacity!,
-      amenities: data.amenities!,
-      availability: {
-        create: availability.map((slot: any) => ({
-          dayOfWeek: slot.dayOfWeek,
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          isAvailable:
-            slot.isAvailable ?? (slot.startTime !== "" && slot.endTime !== ""),
-        })),
-      },
-    };
-
     const room = await prisma.room.create({
-      data: roomData,
-      include: {
-        availability: {
-          select: {
-            dayOfWeek: true,
-            startTime: true,
-            endTime: true,
-          },
-        },
+      data: {
+        floorId,
+        name: data.name,
+        imageUrl: data.imageUrl,
+        description: data.description,
+        type: data.type,
+        status: data.status,
+        capacity: data.capacity ?? defaultRoomValues.capacities,
+        amenities: data.amenities ?? defaultRoomValues.amenities,
+        availableHours:
+          data.availableHours ?? defaultRoomValues.available_hours,
       },
     });
 
@@ -153,9 +116,19 @@ export async function POST(request: NextRequest) {
         message: "Room was created successfully",
         room: {
           ...room,
-          availability: sortAvailabilityByDay(room.availability),
-          createdAt: fromUTCToLocal(room.createdAt).toFormat('yyyy LLL dd hh:mm:ss a'),
-          updatedAt: fromUTCToLocal(room.updatedAt).toFormat('yyyy LLL dd hh:mm:ss a'),
+          availableHours: sortAvailableHours(
+            room.availableHours as {
+              dayOfWeek: string;
+              startTime: string;
+              endTime: string;
+            }[]
+          ),
+          createdAt: fromUTCToLocal(room.createdAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
+          updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
         },
       },
       { status: 201 }
@@ -166,21 +139,20 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// DELETE all rooms within floor or building and skips rooms that have overlapping bookings
+// DELETE all rooms by floor/building/all; and skipping those with bookings
 export async function DELETE(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const buildingId = searchParams.get("buildingId");
-    const floorId = searchParams.get("floorId");
+    const validIds = z.object({
+      floorId: z.string().uuid().optional(),
+      buildingId: z.string().uuid().optional(),
+    }).strict();
+    const body = await request.json();
+    const { floorId, buildingId } = validIds.parse(body);
 
-    // Ensure exactly one of buildingId or floorId is provided
-    if (!floorId && !buildingId) {
-      return NextResponse.json(
-        { error: "Either floorId or buildingId must be provided." },
-        { status: 400 }
-      );
-    }
+    // Build the filter
+    const filter: Record<string, any> = {};
 
+    // Allow only one criteria (floorId, or buildingId, or neither)
     if (floorId && buildingId) {
       return NextResponse.json(
         { error: "Provide only one: either floorId or buildingId, not both." },
@@ -188,15 +160,13 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Build the base filter
-    const filter: Record<string, any> = {};
     if (floorId) {
       filter.floorId = floorId;
-    } else {
+    } else if (buildingId) {
       filter.floor = { buildingId };
     }
 
-    // Fetch all rooms to consider
+    // Fetch all condidate rooms
     const candidateRooms = await prisma.room.findMany({
       where: filter,
       select: {
@@ -349,13 +319,6 @@ export async function GET(request: NextRequest) {
     }
 
     const include = {
-      floor: {
-        select: {
-          id: true,
-          floorNumber: true,
-          building: { select: { id: true, name: true } },
-        },
-      },
       ...(startDateTime &&
         endDateTime && {
           bookings: {
@@ -368,12 +331,10 @@ export async function GET(request: NextRequest) {
         }),
     } as const;
 
-    const candidateRooms: Prisma.RoomGetPayload<{
-      include: typeof include;
-    }>[] = await prisma.room.findMany({
+    const candidateRooms = await prisma.room.findMany({
       where: filter,
       include,
-      orderBy: { capacity: "asc" },
+      orderBy: { name: "asc" },
     });
 
     // Filter out rooms with conflicting bookings
@@ -386,29 +347,37 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(
       {
+        success: true,
         total: availableRooms.length,
         availableRooms: availableRooms.map((room) => ({
           id: room.id,
+          floorId: room.floorId,
           imageUrl: room.imageUrl,
           name: room.name,
-          capacity: room.capacity,
           type: room.type,
           status: room.status,
+          capacity: room.capacity,
           amenities: room.amenities,
-          floor: {
-            id: room.floor.id,
-            floorNumber: room.floor.floorNumber,
-            building: room.floor.building,
-          },
+          availableHours: sortAvailableHours(
+            room.availableHours as {
+              dayOfWeek: string;
+              startTime: string;
+              endTime: string;
+            }[]
+          ),        
+          description: room.description,
+          createdAt: fromUTCToLocal(room.createdAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
+          updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
         })),
       },
       { status: 200 }
     );
   } catch (error) {
     console.error("Room search failed:", error);
-    return NextResponse.json(
-      { error: "Failed to filter rooms" },
-      { status: 500 }
-    );
+    return HandleZodError(error);
   }
 }

@@ -22,7 +22,7 @@ if (!ACCESS_SECRET || !REFRESH_SECRET) {
 }
 
 export class JWT {
-  static async signAccessToken(payload: AccessTokenPayload): Promise<string> {
+  static signAccessToken(payload: AccessTokenPayload): string {
     try {
       return jwt.sign(payload, ACCESS_SECRET, {
         expiresIn: AUTH_CONSTANTS.ACCESS_TOKEN_EXPIRES_IN,
@@ -33,7 +33,7 @@ export class JWT {
     }
   }
 
-  static async signRefreshToken(payload: RefreshTokenPayload): Promise<string> {
+  static signRefreshToken(payload: RefreshTokenPayload): string {
     try {
       return jwt.sign(payload, REFRESH_SECRET, {
         expiresIn: AUTH_CONSTANTS.REFRESH_TOKEN_EXPIRES_IN,
@@ -44,7 +44,7 @@ export class JWT {
     }
   }
 
-  static async verifyAccessToken(token: string): Promise<AccessTokenPayload> {
+  static verifyAccessToken(token: string): AccessTokenPayload {
     try {
       return jwt.verify(token, ACCESS_SECRET) as AccessTokenPayload;
     } catch (error) {
@@ -57,7 +57,7 @@ export class JWT {
     }
   }
 
-  static async verifyRefreshToken(token: string): Promise<RefreshTokenPayload> {
+  static verifyRefreshToken(token: string): RefreshTokenPayload {
     try {
       return jwt.verify(token, REFRESH_SECRET) as RefreshTokenPayload;
     } catch (error) {

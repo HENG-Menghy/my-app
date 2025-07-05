@@ -2,6 +2,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { AUTH_CONSTANTS, COOKIES } from "./constants";
+import { Logger } from "../logger";
 
 const options = COOKIES.OPTIONS;
 
@@ -15,7 +16,12 @@ export class CookieManager {
   }
 
   static getAccessTokenCookie(request: NextRequest): string | null {
-    return request.cookies.get(COOKIES.ACCESS)?.value ?? null;
+    try {
+      return request.cookies.get(COOKIES.ACCESS)?.value ?? null;
+    } catch (error) {
+      Logger.error("GET_ACCESS_TOKEN_COOKIE_ERROR", error as Error);
+      return null;
+    }
   }
 
   static clearAccessTokenCookie(response: NextResponse): void {
@@ -31,7 +37,12 @@ export class CookieManager {
   }
 
   static getRefreshTokenCookie(request: NextRequest): string | null {
-    return request.cookies.get(COOKIES.REFRESH)?.value ?? null;
+    try {
+      return request.cookies.get(COOKIES.REFRESH)?.value ?? null;
+    } catch (error) {
+      Logger.error("GET_REFRESH_TOKEN_COOKIE_ERROR", error as Error);
+      return null;
+    }
   }
 
   static clearRefreshTokenCookie(response: NextResponse): void {
@@ -47,7 +58,12 @@ export class CookieManager {
   }
 
   static getSessionCookie(request: NextRequest): string | null {
-    return request.cookies.get(COOKIES.SESSION)?.value ?? null;
+    try {
+      return request.cookies.get(COOKIES.SESSION)?.value ?? null;
+    } catch (error) {
+      Logger.error("GET_SESSION_COOKIE_ERROR", error as Error);
+      return null;
+    }
   }
 
   static clearSessionCookie(response: NextResponse): void {

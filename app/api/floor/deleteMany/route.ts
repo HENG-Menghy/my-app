@@ -1,31 +1,22 @@
 // @/api/floor/deleteMany/route.ts
 
 import prisma from "@/lib/db/prisma";
+import { HandleZodError } from "@/utils/validationError";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+// Bulk-deleting floors
 export async function DELETE(request: NextRequest) {
   try {
+    const validFloorIds = z.array(z.string().uuid()).nonempty();
     const body = await request.json();
-    const floorIds: string[] = body.id;
+    const floorIds = validFloorIds.parse(body);
 
     if (!floorIds || !Array.isArray(floorIds) || floorIds.length === 0) {
       return NextResponse.json(
         { error: "No floor IDs provided" },
         { status: 400 }
       );
-    }
-
-    // Validate each floor ID using Zod
-    const idSchema = z.string().uuid();
-    for (const id of floorIds) {
-      const result = idSchema.safeParse(id);
-      if (!result.success) {
-        return NextResponse.json(
-          { error: `Invalid floor ID: ${id}` },
-          { status: 400 }
-        );
-      }
     }
 
     // Fetch floors with their building and room details (including bookings)
@@ -83,7 +74,7 @@ export async function DELETE(request: NextRequest) {
     });
 
     // Update the building totals. Note: building.totalFloors represents numbered floors only.
-    await prisma.building.update({
+    const building = await prisma.building.update({
       where: { id: buildingId },
       data: {
         totalFloors: newTotalNumberedFloors,
@@ -94,16 +85,14 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json(
       {
-        message: `${floorIds.length} floors were deleted successfully`,
+        success: true,
+        message: `${floorIds.length} floors belong to building ${building.name} were deleted successfully`,
         deletedIds: floorIds,
       },
       { status: 200 }
     );
   } catch (err) {
     console.error("Many floors deletion error:", err);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return HandleZodError(err);
   }
 }

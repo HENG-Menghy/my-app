@@ -1,19 +1,15 @@
 // @/api/room/deleteMany/route.ts
 
 import prisma from "@/lib/db/prisma";
+import { HandleZodError } from "@/utils/validationError";
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 
 export async function DELETE(request: NextRequest) {
   try {
+    const validRoomIds = z.array(z.string().uuid()).nonempty();
     const body = await request.json();
-    const { ids } = body;
-
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return NextResponse.json(
-        { error: "No room IDs provided" },
-        { status: 400 }
-      );
-    }
+    const ids = validRoomIds.parse(body);
 
     // Fetch rooms including bookings and names
     const roomsToProcess = await prisma.room.findMany({
@@ -85,7 +81,8 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json(
       {
-        message: "Room deletion processed",
+        success: true,
+        message: "Room deletion successfully processed",
         deletedRooms: deletedRoomNames,
         skippedRooms,
       },
@@ -93,9 +90,6 @@ export async function DELETE(request: NextRequest) {
     );
   } catch (error) {
     console.error("Error during bulk deletion:", error);
-    return NextResponse.json(
-      { error: "Failed to delete rooms" },
-      { status: 500 }
-    );
+    return HandleZodError(error);
   }
 }

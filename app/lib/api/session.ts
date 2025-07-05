@@ -20,7 +20,7 @@ export async function getSessionMetadata(request: NextRequest): Promise<SessionM
         },
         location: {
             country: geoLocation?.country,
-            city: geoLocation?.city
+            city: geoLocation?.city,
         }
     }
 }

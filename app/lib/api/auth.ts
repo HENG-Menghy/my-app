@@ -13,13 +13,13 @@ interface AuthUser {
   role: UserRole;
 }
 
-export async function getAuthUser(request: NextRequest): Promise<AuthUser> {
+export function getAuthUser(request: NextRequest): AuthUser {
   try {
     const authHeader = request.headers.get("authorization");
     const token = authHeader?.replace("Bearer ", "").trim();
     if (!token) throw AuthError.unauthorized();
 
-    const payload = await JWT.verifyAccessToken(token);
+    const payload = JWT.verifyAccessToken(token);
     if (!payload?.uid || !payload?.sid || !payload?.email || !payload?.role) {
       throw AuthError.unauthorized();
     }
