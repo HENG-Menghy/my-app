@@ -1,6 +1,8 @@
+// @/components/clock.tsx
+
 import { useEffect, useState } from "react";
 
-export default function Clock() {
+const Clock = () => {
   const [date, setDate] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -30,13 +32,11 @@ export default function Clock() {
   });
 
   return (
-    <div className="flex flex-col items-center justify-center text-white font-semibold">
-      <h1 className="tracking-wide text-base md:text-xl font-bold text-[var(--primary-color)] drop-shadow-sm">
-        {timeString}
-      </h1>
-      <h1 className="tracking-wide text-gray-300 text-xs md:text-base italic">
-        {dateString}
-      </h1>
+    <div className="flex flex-col items-center justify-center px-2 py-[2px] rounded-md border border-colorBorder bg-transparent select-none">
+      <span className="tracking-wide font-semibold text-primary">{timeString}</span>
+      <span className="italic text-black dark:text-white">{dateString}</span>
     </div>
   );
-}
+};
+
+export default Clock;

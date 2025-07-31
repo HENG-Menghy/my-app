@@ -12,8 +12,12 @@ export class AuthError extends Error {
     this.name = "AuthError";
   }
 
+  static forbidden() {
+    return new AuthError("FORBIDDEN", "You are not authorized to access this resource", 403);
+  }
+
   static unauthorized() {
-    return new AuthError("UNAUTHORIZED", "You are not authorized", 401);
+    return new AuthError("UNAUTHORIZED", "You are not authorized, please login", 401);
   }
 
   static invalidCredentials() {

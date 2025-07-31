@@ -4,23 +4,26 @@ import prisma from "@/lib/db/prisma";
 import { FormattedDateDisplay } from "@/utils/datetime";
 import { FloorSchema } from "@/lib/validations/floor";
 import { NextRequest, NextResponse } from "next/server";
-import { HandleZodError } from "@/utils/validationError";
 import { getRoomName } from "@/utils/generateRoomName";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
 import { z } from "zod";
 import { normalizeName } from "@/utils/normalizeName";
+import { Floor } from "@prisma/client";
+import { validateRequest } from "@/lib/api/validate";
+import { ApiResponse } from "@/lib/api/response";
 
 // CREATE new floor
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const data = FloorSchema.parse(body);
+    const data = await validateRequest(FloorSchema, body);
     const { 
       buildingId, 
       name, 
       floorNumber, 
       totalRooms,
+      description,
+      RoomsImage,
       RoomsCapacities,
       RoomsAmenities,
       RoomsAvailableHours,
@@ -34,7 +37,10 @@ export async function POST(request: NextRequest) {
 
     if (!existingBuilding) {
       return NextResponse.json(
-        { error: "Building not found" },
+        { 
+          success: false,
+          message: "Building not found" 
+        },
         { status: 404 }
       );
     }
@@ -46,7 +52,10 @@ export async function POST(request: NextRequest) {
 
     if (existingFloor) {
       return NextResponse.json(
-        { error: `Floor ${floorNumber} already exists in this building` },
+        { 
+          success: false,
+          message: `Floor ${floorNumber} already exists in building ${existingBuilding.name}` 
+        },
         { status: 400 }
       );
     }
@@ -65,7 +74,10 @@ export async function POST(request: NextRequest) {
 
       if (existingName) {
         return NextResponse.json(
-          { error: `Floor name '${name.trim()}' already exists` },
+          { 
+            success: false,
+            message: `Floor name '${name.trim()}' already exists` 
+          },
           { status: 400 }
         );
       }
@@ -80,7 +92,8 @@ export async function POST(request: NextRequest) {
           name,
           floorNumber,
           totalRooms,
-          label: getFloorLabel(floorNumber) 
+          label: getFloorLabel(floorNumber),
+          description,
         },
       });
 
@@ -92,9 +105,10 @@ export async function POST(request: NextRequest) {
           data: {
             name: roomName,
             floorId: createdFloor.id,
-            capacity: RoomsCapacities ?? defaultRoomValues.capacities,
-            amenities: RoomsAmenities ?? defaultRoomValues.amenities,
-            availableHours: RoomsAvailableHours ?? defaultRoomValues.available_hours,
+            imageUrl: RoomsImage,
+            capacity: RoomsCapacities,
+            amenities: RoomsAmenities,
+            availableHours: RoomsAvailableHours,
           },
         });
       };
@@ -130,42 +144,64 @@ export async function POST(request: NextRequest) {
       return createdFloor;
     });
 
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        success: true,
-        message: "Floor created successfully",
-        floor: FormattedDateDisplay(result),
+        message: `Successfully create floor ${result.floorNumber} in building ${existingBuilding.name}`,
+        data: FormattedDateDisplay(result),
       },
-      { status: 201 }
     );
   } catch (error: unknown) {
     console.log("Create floor error: ", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }
 
 /*
   GET all floors
-  Retrieve all floors, ordering by building and floor number
+  Retrieve floors by building/all, and ordering by floor number
 */
-export async function GET(_: NextRequest) {
+export async function GET(request: NextRequest) {
   try {
-    const floors = await prisma.floor.findMany({
-      orderBy: [{ buildingId: "asc" }, { floorNumber: "asc" }],
-    });
-    return NextResponse.json(
+    const { searchParams } = new URL(request.url);
+    const buildingIdParam = searchParams.get("buildingId");
+    const validBuildingId = z.string().uuid();
+    const buildingId = await validateRequest(validBuildingId, buildingIdParam)
+    
+    let floors = [] as Floor[];
+    let buildingName: string = "";
+    if (buildingId) {
+      const building = await prisma.building.findUnique({
+        where: { id: buildingId },
+        select: { name: true },
+      });
+      if (!building) {
+        return NextResponse.json(
+          { 
+            success: false,
+            message: "The provided buildingId param does not exist for any building"  
+          },
+          { status: 400 },
+        )
+      }
+      buildingName = building.name;
+      floors = await prisma.floor.findMany({
+        where: { buildingId },
+        orderBy: { floorNumber: "asc" },
+      });
+    } else {
+      floors = await prisma.floor.findMany({
+        orderBy: [{ buildingId: "asc" }, { floorNumber: "asc" }],
+      });
+    }
+    return ApiResponse.success(
       {
-        success: true,
-        AllFloors: FormattedDateDisplay(floors),
+        message: `Successfully get all floors${buildingId ? ` belong to building ${buildingName}` : ""}`,
+        data: FormattedDateDisplay(floors),
       }, 
-      { status: 200 }
     );
   } catch (error) {
     console.error("Error fetching floors:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch floors" },
-      { status: 500 }
-    );
+    return ApiResponse.error(error);
   }
 }
 
@@ -176,7 +212,7 @@ export async function DELETE(request: NextRequest) {
   try {
     const validBuildingId = z.string().uuid();
     const body = await request.json();
-    const buildingId = validBuildingId.parse(body);
+    const buildingId = await validateRequest(validBuildingId, body);
 
     // Ensure the building exists.
     const building = await prisma.building.findUnique({
@@ -184,7 +220,10 @@ export async function DELETE(request: NextRequest) {
     });
     if (!building) {
       return NextResponse.json(
-        { error: "Building not found" },
+        { 
+          success: false,
+          message: "Building not found" 
+        },
         { status: 404 }
       );
     }
@@ -206,16 +245,14 @@ export async function DELETE(request: NextRequest) {
       where: { buildingId },
     });
 
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        success: true,
-        message: `All floors belonging to building ${building.name} were successfully deleted.`,
-        remainingFloors,
+        message: `All floors belonging to building ${building.name} were successfully deleted`,
+        data: remainingFloors,
       },
-      { status: 200 }
     );
   } catch (error) {
     console.error("Error deleting floors:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }

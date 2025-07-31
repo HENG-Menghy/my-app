@@ -5,9 +5,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { RoomUpdateSchema } from "@/lib/validations/room";
 import { fromUTCToLocal } from "@/utils/datetime";
 import { normalizeName } from "@/utils/normalizeName";
-import { getRoomName } from "@/utils/generateRoomName";
-import { HandleZodError } from "@/utils/validationError";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
+import { ApiResponse } from "@/lib/api/response";
+import { validateRequest } from "@/lib/api/validate";
+import { BookingStatus } from "@prisma/client";
 
 // GET Single Room
 export async function GET(
@@ -15,8 +16,9 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const { id } = await params;
     const room = await prisma.room.findUnique({
-      where: { id: params.id },
+      where: { id },
       select: {
         id: true,
         floorId: true,
@@ -26,7 +28,7 @@ export async function GET(
         status: true,
         capacity: true,
         amenities: true,
-       availableHours: true,
+        availableHours: true,
         description: true,
         createdAt: true,
         updatedAt: true,
@@ -39,14 +41,20 @@ export async function GET(
     });
 
     if (!room) {
-      return NextResponse.json({ error: "Room not found" }, { status: 404 });
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Room not found",
+        },
+        { status: 404 }
+      );
     }
 
-    return NextResponse.json(
-      {
-        success: true,
+    return ApiResponse.success({
+      message: `Successfully get room ${room.name} on ${room.floor.label} of building ${room.floor.building.name}`,
+      data: {
         ...room,
-        availability: sortAvailableHours(
+        availableHours: sortAvailableHours(
           room.availableHours as {
             dayOfWeek: string;
             startTime: string;
@@ -78,14 +86,10 @@ export async function GET(
           },
         },
       },
-      { status: 200 }
-    );
+    });
   } catch (error) {
     console.error("Error fetching room:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch room" },
-      { status: 500 }
-    );
+    return ApiResponse.error(error);
   }
 }
 
@@ -95,19 +99,30 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
+    const { id } = await params;
     const room = await prisma.room.findUnique({
-      where: { id: params.id },
-      select: { floorId: true, name: true, bookings: { select: { id: true } } },
+      where: { id },
+      select: {
+        floorId: true,
+        name: true,
+        bookings: { select: { id: true, status: true } },
+      },
     });
     if (!room) {
       return NextResponse.json(
-        { error: "Room does not exist" },
+        {
+          success: false,
+          message: "Room does not exist",
+        },
         { status: 404 }
       );
     }
-    if (room.bookings.length > 0) {
+    if (room.bookings.some((b) => b.status === BookingStatus.approved)) {
       return NextResponse.json(
-        { error: "Cannot delete room; it contain bookings" },
+        {
+          success: false, 
+          message: `Cannot delete room ${room.name}; it contains approved bookings` 
+        },
         { status: 400 }
       );
     }
@@ -137,20 +152,13 @@ export async function DELETE(
       }),
     ]);
 
-    return NextResponse.json(
-      { 
-        success: true,
-        message: `Room ${room.name} was deleted successfully`, 
-        deletedId: params.id 
-      },
-      { status: 200 }
-    );
+    return ApiResponse.success({
+      message: `Room ${room.name} was deleted successfully`,
+      data: { deletedId: params.id },
+    });
   } catch (error) {
     console.error("Error deleting room:", error);
-    return NextResponse.json(
-      { error: "Failed to delete room" },
-      { status: 500 }
-    );
+    return ApiResponse.error(error);
   }
 }
 
@@ -160,9 +168,9 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   try {
-    const roomId = params.id;
+    const roomId = await params.id;
     const body = await request.json();
-    const roomData = RoomUpdateSchema.parse(body);
+    const roomData = await validateRequest(RoomUpdateSchema, body);
     const { name, floorId, availableHours } = roomData;
 
     // Fetch current room details.
@@ -172,8 +180,11 @@ export async function PATCH(
     });
     if (!existingRoom) {
       return NextResponse.json(
-        { error: "Room does not exist" },
-        { status: 400 }
+        { 
+          success: false,
+          message: "Room not found" 
+        }, 
+        { status: 404 }
       );
     }
 
@@ -181,108 +192,67 @@ export async function PATCH(
     const newFloorId = floorId ? floorId : oldFloorId;
     const floorChanged = newFloorId !== oldFloorId;
 
-    // --- Handle Name Update ---
+    // -- Handle moving room to new floor --
+    let floorNumber, buildingName;
     if (floorChanged) {
-      // When moving floor
-      if (typeof name === "string" && name.trim() !== "") {
-        const cleanedName = normalizeName(name);
-        if (cleanedName !== existingRoom.name) {
-          const duplicateRoom = await prisma.room.findFirst({
-            where: {
-              name: { equals: cleanedName, mode: "insensitive" },
-              NOT: { id: roomId },
-            },
-          });
-          if (duplicateRoom) {
-            return NextResponse.json(
-              {
-                error: `Cannot change name to '${cleanedName}': It already exists`,
-              },
-              { status: 400 }
-            );
-          }
-        }
-        roomData.name = cleanedName;
-      } else {
-        // Generate default name for destination floor
-        const newFloor = await prisma.floor.findUnique({
-          where: { id: newFloorId },
-          select: { buildingId: true, floorNumber: true },
-        });
-        if (!newFloor) {
-          return NextResponse.json(
-            { error: "The new floor does not exist" },
-            { status: 400 }
-          );
-        }
-        const newBuilding = await prisma.building.findUnique({
-          where: { id: newFloor.buildingId },
-          select: { name: true },
-        });
-        if (!newBuilding) {
-          return NextResponse.json(
-            { error: "Building for the new floor does not exist" },
-            { status: 400 }
-          );
-        }
-        // Count rooms on new floor excluding the moving room.
-        const newRoomCount = await prisma.room.count({
-          where: { floorId: newFloorId, id: { not: roomId } },
-        });
-        // Since getRoomName() adds one internally, pass newRoomCount (zero-based).
-        roomData.name = getRoomName(
-          newBuilding.name,
-          newFloor.floorNumber,
-          newRoomCount
-        );
-      }
-    } else {
-      // When not moving floor, handle manual name update
-      if (typeof name === "string" && name.trim() !== "") {
-        const cleanedName = normalizeName(name);
-        if (cleanedName !== existingRoom.name) {
-          const duplicateRoom = await prisma.room.findFirst({
-            where: {
-              name: { equals: cleanedName, mode: "insensitive" },
-              NOT: { id: roomId },
-            },
-          });
-          if (duplicateRoom) {
-            return NextResponse.json(
-              {
-                error: `Cannot change name to '${cleanedName}': It already exists`,
-              },
-              { status: 400 }
-            );
-          }
-        }
-        roomData.name = cleanedName;
-      }
-    }
-    // --- End Handle Name Update ---
-
-    // Validate new floor if moving
-    if (roomData.floorId && floorChanged) {
       const newFloor = await prisma.floor.findUnique({
         where: { id: newFloorId },
-        select: { buildingId: true },
+        select: { buildingId: true, floorNumber: true },
       });
       if (!newFloor) {
         return NextResponse.json(
-          { error: "The new floor does not exist" },
+          { 
+            success: false,
+            message: "The new floor does not exist" 
+          },
           { status: 400 }
         );
       }
+      const building = await prisma.building.findUnique({
+        where: { id: newFloor.buildingId },
+        select: { name: true },
+      });
+
+      floorNumber = newFloor.floorNumber;
+      buildingName = building?.name;
+      roomData.floorId = newFloorId;
+    }
+
+    // --- Handle Name Update ---
+    if (typeof name === "string" && name.trim() !== "") {
+      const cleanedName = normalizeName(name);
+      if (cleanedName !== existingRoom.name) {
+        const duplicateRoom = await prisma.room.findFirst({
+          where: {
+            name: { equals: cleanedName, mode: "insensitive" },
+            NOT: { id: roomId },
+          },
+        });
+        if (duplicateRoom) {
+          return NextResponse.json(
+            {
+              success: false,
+              message: `Cannot change name to '${cleanedName}': It already exists`,
+            },
+            { status: 400 }
+          );
+        }
+      }
+      roomData.name = cleanedName;
     }
 
     if (availableHours && availableHours?.length > 0) {
       // Create a map from existing for faster look up
       const hoursMap = new Map<string, any>();
       const room = await prisma.room.findUnique({ where: { id: roomId } });
-      const oldAvailableHours = room?.availableHours as { dayOfWeek: string; startTime: string; endTime: string }[];
+      const oldAvailableHours = room?.availableHours as {
+        dayOfWeek: string;
+        startTime: string;
+        endTime: string;
+      }[];
       for (const entry of oldAvailableHours) {
         if (entry?.dayOfWeek) {
-          hoursMap.set(entry.dayOfWeek.toLocaleLowerCase(), entry)
+          hoursMap.set(entry.dayOfWeek.toLocaleLowerCase(), entry);
         }
       }
 
@@ -290,7 +260,10 @@ export async function PATCH(
       for (const override of availableHours) {
         const day = override.dayOfWeek.toLocaleLowerCase();
         const existing = hoursMap.get(day);
-        hoursMap.set(day, existing ? { ...existing, ...override } : { ...override });
+        hoursMap.set(
+          day,
+          existing ? { ...existing, ...override } : { ...override }
+        );
       }
       roomData.availableHours = Array.from(hoursMap.values());
     }
@@ -349,70 +322,36 @@ export async function PATCH(
 
     // Update counts on destination floor
     await updateCountsForFloor(newFloorId);
-    // If moved, update old floor counts and re-number its rooms
+    // If moved, update old floor counts
     if (floorChanged) {
       await updateCountsForFloor(oldFloorId);
-
-      // Re-number rooms on the old floor.
-      // Use a reliable order (assume a 'createdAt' field exists; otherwise adjust accordingly)
-      const oldFloorRooms = await prisma.room.findMany({
-        where: { floorId: oldFloorId },
-        orderBy: { createdAt: "asc" },
-      });
-      const oldFloorData = await prisma.floor.findUnique({
-        where: { id: oldFloorId },
-        select: { buildingId: true, floorNumber: true },
-      });
-      if (oldFloorData) {
-        // It's common to use a similar query to find the building.
-        const buildingData = await prisma.building.findUnique({
-          where: { id: oldFloorData.buildingId },
-          select: { name: true },
-        });
-        if (buildingData) {
-          for (let i = 0; i < oldFloorRooms.length; i++) {
-            // Pass zero-based index `i`. getRoomName adds one internally.
-            const expectedName = getRoomName(
-              buildingData.name,
-              oldFloorData.floorNumber,
-              i
-            );
-            if (oldFloorRooms[i].name !== expectedName) {
-              await prisma.room.update({
-                where: { id: oldFloorRooms[i].id },
-                data: { name: expectedName },
-              });
-            }
-          }
-        }
-      }
     }
 
-    return NextResponse.json(
-      {
-        success: true,
-        message: `Room ${existingRoom.name} was successfully updated`,
-        updatedRoom: {
-          ...updatedRoom,
-          availableHours: sortAvailableHours(
-            updatedRoom!.availableHours as {
-              dayOfWeek: string;
-              startTime: string;
-              endTime: string;
-            }[]
-          ),
-          createdAt: fromUTCToLocal(updatedRoom!.createdAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-          updatedAt: fromUTCToLocal(updatedRoom!.updatedAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-        },
+    return ApiResponse.success({
+      message: `${
+        floorChanged
+          ? `Successfully moved room ${existingRoom.name} to floor ${floorNumber} of building ${buildingName}`
+          : `Room ${existingRoom.name} was successfully updated`
+      }`,
+      data: {
+        ...updatedRoom,
+        availableHours: sortAvailableHours(
+          updatedRoom!.availableHours as {
+            dayOfWeek: string;
+            startTime: string;
+            endTime: string;
+          }[]
+        ),
+        createdAt: fromUTCToLocal(updatedRoom!.createdAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+        updatedAt: fromUTCToLocal(updatedRoom!.updatedAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
       },
-      { status: 200 }
-    );
+    });
   } catch (error) {
     console.error("Error updating room:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }

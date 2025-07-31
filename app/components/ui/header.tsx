@@ -1,47 +1,120 @@
+// @/components/ui/header.tsx
+
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
-import Clock from "./clock";
+import Clock from "../clock";
+import ThemeToggle from "../buttons/themeToggle";
+import Logo from "../logo";
+import {
+  HomeIcon,
+  CalendarDaysIcon,
+  BuildingOffice2Icon,
+} from "@heroicons/react/24/outline";
+import clsx from "clsx";
+import { usePathname } from "next/navigation";
+import AuthActions from "./authActions";
 
 const Header = () => {
+  const path = usePathname();
+  const navItems = [
+    {
+      href: "/home",
+      label: "Home",
+      icon: <HomeIcon className="size-5" />,
+      title: "Go to home page",
+    },
+    {
+      href: "/meeting",
+      label: "Meeting List",
+      icon: <CalendarDaysIcon className="size-5" />,
+      title: "Go to meeting list page",
+    },
+    {
+      href: "/room",
+      label: "Room",
+      icon: <BuildingOffice2Icon className="size-5" />,
+      title: "Go to room page",
+    },
+  ];
+
   return (
-    <nav className="w-full px-5 py-2 flex justify-between items-center border-b border-gray-800 bg-[var(--background)/60] backdrop-blur-md shadow-lg z-20">
-      <Link href="/" className="cursor-pointer flex items-center">
-        <Image
-          src="/mrms.png"
-          alt="System logo"
-          width={90}
-          height={90}
-          className="block md:hidden"
-        />
-        <Image
-          src="/mrms.png"
-          alt="System logo"
-          width={130}
-          height={130}
-          className="hidden md:block"
-        />
-      </Link>
-
-      <div className="max-[425px]:hidden -mt-1">
-        <Clock />
-      </div>
-      <div className="md:flex gap-3 hidden">
-        <Link href="/login">
-          <button className="px-4 py-2 text-xs md:text-base tracking-wide cursor-pointer rounded-md border-2 border-transparent hover:bg-[#d6fbee] hover:border-[#d6fbee] hover:underline hover:text-[var(--primary-color)] transition duration-200">
-            Login
-          </button>
+    <header className="sticky top-0 z-20 border-b border-colorBorder">
+      <nav className="max-w-[1440px] mx-auto flex items-center justify-between px-4 py-[6px] backdrop-blur-md">
+        {/* Logo */}
+        <Link
+          href="/"
+          aria-label="Home"
+          title="Go to home page"
+          className="flex items-center -mb-1 shrink-0"
+        >
+          <Logo width="w-30" height="h-auto" />
         </Link>
-        <Link href="/sign-up">
-          <button className="px-4 py-2 text-xs md:text-base tracking-wide cursor-pointer rounded-md  border-2 text-[var(--primary-color)] border-[var(--primary-hover)] hover:text-white hover:bg-[var(--primary-color)] hover:underline transition duration-200">
-            Sign up
-          </button>
-        </Link>
-      </div>
 
-      <div className="md:hidden flex ml-10 cursor-pointer">=</div>
-    </nav>
+        {/* Nav links */}
+        <nav className="hidden md:flex items-center gap-6 ml-10 mr-auto shrink-0">
+          {navItems.map(({ href, label, icon, title }, idx) => (
+            <Link
+              key={idx}
+              href={href}
+              aria-label={label}
+              title={title}
+              className={clsx(
+                "inline-flex items-center gap-2",
+                path === href
+                  ? "text-primary"
+                  : "text-gray-600 dark:text-gray-400 hover:text-black dark:hover:text-white active:text-primary dark:active:text-primary"
+              )}
+            >
+              {/* Icon: hidden on md; show on lg */}
+              <span className="hidden lg:flex"> {icon} </span>
+              <span className="-mb-[6px]">{label}</span>
+            </Link>
+          ))}
+        </nav>
+
+        {/* Clock */}
+        <div className="flex items-center md:hidden shrink-0">
+          <Clock />
+        </div>
+
+        {/* Nav actions */}
+        <div className="hidden md:flex items-center gap-2 shrink-0">
+          <Clock />
+          <ThemeToggle />
+          <AuthActions />
+        </div>
+      </nav>
+
+      {/* Mobile action */}
+      <nav className="md:hidden flex justify-between items-center px-4 py-[6px] border-t border-colorBorder backdrop-blur-md">
+        {/* Left */}
+        <nav className="flex items-center gap-2 shrink-0">
+          {navItems.map(({ href, label, icon, title }, idx) => (
+            <Link
+              key={idx}
+              href={href}
+              aria-label={label}
+              title={title}
+              className={clsx(
+                "inline-block p-[10px] rounded-full border",
+                path === href
+                  ? "border-primary bg-primary text-white"
+                  : "border-colorBorder hover:border-transparent active:border-transparent hover:text-white active:text-white hover:bg-gray-400 active:bg-primary dark:hover:bg-gray-600  dark:active:bg-primary"
+              )}
+            >
+              <span> {icon} </span>
+            </Link>
+          ))}
+        </nav>
+
+        {/* Right */}
+        <div className="flex items-center gap-2 shrink-0">
+          <ThemeToggle />
+          <AuthActions />
+        </div>
+      </nav>
+    </header>
   );
 };
 

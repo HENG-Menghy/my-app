@@ -1,23 +1,147 @@
+/* globals.css */
+
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* custom utility classes */
+@theme {
+  /* custom color */
+  --color-colorBg: var(--color-bg);
+  --color-colorText: var(--color-text);
+  --color-colorBorder: var(--color-border);
+  --color-muted: var(--color-muted);
+  --color-primary: var(--color-primary);
+  --color-primaryHover: var(--color-primary-hover);
+  --color-primaryActive: var(--color-primary-active);
+  --color-secondary: var(--color-secondary);
+  --color-secondaryHover: var(--color-secondary-hover);
+  --color-secondaryActive: var(--color-secondary-active);
+  --color-warning: var(--color-warning);
+  --color-warningHover: var(--color-warning-hover);
+  --color-warningActive: var(--color-warning-active);
+  --color-danger: var(--color-danger);
+  --color-dangerHover: var(--color-danger-hover);
+  --color-dangerActive: var(--color-danger-active);
+
+  /* custom animation */
+  --animate-pulse-scale: pulse-scale 2s ease-in-out infinite;
+  --animate-ping: ping 2s ease-out infinite;
+  --animate-pulse-color-danger: pulse-color-danger 5s ease-in-out infinite;
+  --animate-subtle-saturate: subtle-saturate 3s ease-in-out infinite;
+
+  @keyframes pulse-scale {
+    0%, 100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(1.1);
+      opacity: 0.8;
+    }
+  }
+
+  @keyframes ping {
+    75%, 100% {
+      transform: scale(1.2);
+      opacity: 0.7;
+    }
+  }
+
+  @keyframes pulse-color-danger {
+    0% {
+      color: var(--color-danger);
+    }
+    25% {
+      color: var(--color-danger-active);
+    }
+    50% { 
+      color: var(--color-danger-hover);
+    }
+    75% {
+      color: var(--color-danger-active);
+    } 
+    100% {
+      color: var(--color-danger);
+    }
+  }
+
+  @keyframes subtle-saturate {
+    0% {
+      filter: saturate(100%);
+    }
+    25% {
+      filter: saturate(120%);
+    }
+    50% {
+      filter: saturate(150%);
+    }
+    75% {
+      filter: saturate(120%);
+    }
+    100% {
+      filter: saturate(100%);
+    }
+  }
+}
+
 :root {
-  --background: #0f0f0f;
-  --foreground: #ffffff;
-  --primary-color: #3ecf8e;
-  --pending-color: #f5a623;
-  --deleting-color: #e63946;
+  /* text and background */
+  --color-bg: #f9fafb;
+  --color-text: #111827;
 
-  /* Hover States */
-  --primary-hover: #2eaf76;
-  --pending-hover: #d88f1d;
-  --deleting-hover: #c32f39;
-}
-html {
-  scroll-behavior: smooth;
+  /* primary color */
+  --color-primary: #3ecf8e;
+  --color-primary-hover: #2eaf76;
+  --color-primary-active: #259e64;
+
+  /* secondary color */
+  --color-secondary: #99a1af;
+  --color-secondary-hover: #6a7282;
+  --color-secondary-active: #4a5565;
+
+  /* warning color */
+  --color-warning: #f0ad4e;
+  --color-warning-hover: #ec9c2a; 
+  --color-warning-active: #e38e1f;
+
+  /* danger color */
+  --color-danger: #ef4444;
+  --color-danger-hover: #dc2626;
+  --color-danger-active: #b91c1c; 
+
+  /* other */
+  --color-muted: #6b7280;
+  --color-border:#d1d5db;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ==== Dark Mode ==== */
+.dark {
+  /* text and background */
+  --color-bg: #0f172a;
+  --color-text: #f3f4f6;
+
+  /* primary color */
+  --color-primary: #2eaf76;
+  --color-primary-hover: #3ecf8e;
+  --color-primary-active: #1b8e5d;
+
+  /* secondary color */
+  --color-secondary: #6a7282;
+  --color-secondary-hover: #99a1af;
+  --color-secondary-active: #364153;
+
+  /* warning color */
+  --color-warning: #ec9c2a;
+  --color-warning-hover: #f0ad4e;
+  --color-warning-active: #d97707;
+
+  /* danger color */
+  --color-danger: #dc2626;
+  --color-danger-hover: #ef4444;
+  --color-danger-active: #9e1c1c;
+
+  /* other */
+  --color-muted: #94a3b8;
+  --color-border: #475569;
 }

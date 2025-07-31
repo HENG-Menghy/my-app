@@ -19,7 +19,7 @@ export async function getGeoLocation(ip: string): Promise<{
   try {
     // Add timeout to prevent hanging if ipapi.co is slow
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000); // 3 seconds
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5 seconds
 
     const res = await fetch(`https://ipapi.co/${ip}/json/`, {
       signal: controller.signal,

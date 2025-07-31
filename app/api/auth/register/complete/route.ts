@@ -1,16 +1,16 @@
 // @/api/auth/register/complete/route.ts
 
-import { NextRequest } from 'next/server'
-import { authService } from '@/services/authService'
-import { ApiResponse } from '@/lib/api/response'
-import { validateRequest } from '@/lib/api/validate'
-import { registerSchema } from '@/lib/validations/auth'
-import { getSessionMetadata } from '@/lib/api/session'
+import { NextRequest } from "next/server";
+import { authService } from "@/services/authService";
+import { ApiResponse } from "@/lib/api/response";
+import { validateRequest } from "@/lib/api/validate";
+import { registerSchema } from "@/lib/validations/auth";
+import { getSessionMetadata } from "@/lib/api/session";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json()
-    const data = await validateRequest(registerSchema.complete, body)
+    const body = await request.json();
+    const data = await validateRequest(registerSchema.complete, body);
     const metadata = await getSessionMetadata(request);
     await authService.completeRegistration(data, {
       ...metadata,
@@ -19,9 +19,14 @@ export async function POST(request: NextRequest) {
     });
 
     return ApiResponse.success({
-      message: 'Registration completed successfully'
-    })
+      message: "Registration completed successfully",
+    });
   } catch (error) {
-    return ApiResponse.error(error)
+    return ApiResponse.error(error);
   }
 }
+// Female avatar profile
+// "https://zlowucgjecrlilkyoamr.supabase.co/storage/v1/object/public/images-bucket/profiles/default_female_profile.jpg"
+
+// Male avatar profile
+// "https://zlowucgjecrlilkyoamr.supabase.co/storage/v1/object/public/images-bucket/profiles/default_male_profile.jpg"

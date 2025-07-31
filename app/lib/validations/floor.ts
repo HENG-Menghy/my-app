@@ -1,32 +1,31 @@
 // @/lib/validations/floor.ts
 
 import { z } from "zod";
+import { defaultRoomValues } from "@/utils/defaultRoomValues";
+import { SupabaseImageUrl } from "./urlSchema";
+import { AvailableHours } from "./availableHoursSchema";
 
 export const FloorSchema = z
   .object({
     buildingId: z.string().uuid(),
-    floorNumber: z.number().min(0),
-    totalRooms: z.number().min(1),
+    floorNumber: z.number().int().min(0).default(0),
+    totalRooms: z.number().int().min(0).default(0),
     name: z.string().optional(),
     description: z.string().optional(),
-    RoomsCapacities: z.number().min(1).optional(),
-    RoomsAmenities: z.array(z.string()).nonempty().optional(),
-    RoomsAvailableHours: z
-      .array(
-        z.object({
-          dayOfWeek: z.enum([
-            "monday",
-            "tuesday",
-            "wednesday",
-            "thursday",
-            "friday",
-            "saturday",
-            "sunday",
-          ]),
-          startTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
-          endTime: z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/),
-        }),
-      ).optional(),
-  }).strict();
+    RoomsImage: SupabaseImageUrl.default(defaultRoomValues.image_url),
+    RoomsCapacities: z
+      .number()
+      .int()
+      .min(1)
+      .default(defaultRoomValues.capacities),
+    RoomsAmenities: z
+      .array(z.string().min(1))
+      .nonempty()
+      .default(defaultRoomValues.amenities),
+    RoomsAvailableHours: AvailableHours.default(
+      defaultRoomValues.available_hours
+    ),
+  })
+  .strict();
 
 export const FloorUpdateSchema = FloorSchema.partial();

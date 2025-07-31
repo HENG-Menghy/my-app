@@ -1,7 +1,9 @@
 // @/api/floor/deleteMany/route.ts
 
+import { ApiResponse } from "@/lib/api/response";
+import { validateRequest } from "@/lib/api/validate";
 import prisma from "@/lib/db/prisma";
-import { HandleZodError } from "@/utils/validationError";
+import { BookingStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -10,14 +12,7 @@ export async function DELETE(request: NextRequest) {
   try {
     const validFloorIds = z.array(z.string().uuid()).nonempty();
     const body = await request.json();
-    const floorIds = validFloorIds.parse(body);
-
-    if (!floorIds || !Array.isArray(floorIds) || floorIds.length === 0) {
-      return NextResponse.json(
-        { error: "No floor IDs provided" },
-        { status: 400 }
-      );
-    }
+    const floorIds = await validateRequest(validFloorIds, body);
 
     // Fetch floors with their building and room details (including bookings)
     const matchedFloors = await prisma.floor.findMany({
@@ -25,14 +20,29 @@ export async function DELETE(request: NextRequest) {
       select: {
         id: true,
         buildingId: true,
-        floorNumber: true,
-        rooms: { select: { id: true, bookings: { select: { id: true } } } },
+        label: true,
+        rooms: { 
+          select: { 
+            id: true, 
+            name: true,
+            bookings: { 
+              select: { 
+                id: true, 
+                status: true, 
+              }, 
+            },
+          }, 
+        },
       },
     });
 
+    // Ensure that all of the provided floor IDs match the existing floors
     if (matchedFloors.length !== floorIds.length) {
       return NextResponse.json(
-        { error: "Some floor IDs do not exist" },
+        { 
+          success: false,
+          message: "Some floor ID(s) do not exist" ,
+        },
         { status: 400 }
       );
     }
@@ -44,13 +54,47 @@ export async function DELETE(request: NextRequest) {
     );
     if (!sameBuilding) {
       return NextResponse.json(
-        { error: "All floors must belong to the same building" },
+        { 
+          success: false,
+          message: "All floors must belong to the same building" ,
+        },
         { status: 400 }
       );
     }
 
-    // Delete the specified floors
-    await prisma.floor.deleteMany({ where: { id: { in: floorIds } } });
+    // Perform deletion of the specified floors with guard check
+    if (matchedFloors.length === floorIds.length) {
+      const deletableFloors = matchedFloors.filter(
+        (floor) => floor.rooms.every(
+          (room) => room.bookings.every(
+            (booking) => booking.status !== BookingStatus.approved
+          )
+        )
+      );
+
+      if (deletableFloors.length > 0) {
+        await prisma.floor.deleteMany({ where: { id: { in: floorIds } } });
+      } else {
+        const blockedRooms: string[] = matchedFloors.flatMap(
+          (floor) => floor.rooms.filter(
+            (room) => room.bookings.some(
+              (booking) => booking.status === BookingStatus.approved
+            )
+          )
+        ).map(room => room.name);
+        
+        if (blockedRooms.length > 0) {
+          return NextResponse.json(
+            {
+              success: false,
+              message: "Cannot bulk delete floors because some rooms on the floors have approved bookings",
+              roomsWithActiveBookings: blockedRooms,
+            },
+            { status: 400 },
+          );
+        }
+      }
+    }
 
     // Recalculate building totals.
     // Retrieve all the remaining floors of this building WITH their floorNumber.
@@ -83,16 +127,16 @@ export async function DELETE(request: NextRequest) {
       },
     });
 
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        success: true,
-        message: `${floorIds.length} floors belong to building ${building.name} were deleted successfully`,
-        deletedIds: floorIds,
+        message: `${floorIds.length} floor(s) belong to building ${building.name} were deleted successfully`,
+        data: { 
+          "deletedFloor(s)": matchedFloors.map(f => f.label) 
+        },
       },
-      { status: 200 }
     );
   } catch (err) {
     console.error("Many floors deletion error:", err);
-    return HandleZodError(err);
+    return ApiResponse.error(err);
   }
 }

@@ -1,38 +1,37 @@
 // @/api/building/route.ts
 
 import prisma from "@/lib/db/prisma";
-import { BuildingSchema } from "@/lib/validations/building";
 import { NextRequest, NextResponse } from "next/server";
 import { FormattedDateDisplay } from "@/utils/datetime";
-import { HandleZodError } from "@/utils/validationError";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
 import { normalizeName } from "@/utils/normalizeName";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
 import { getRoomName } from "@/utils/generateRoomName";
+import { BuildingSchema } from "@/lib/validations/building";
+import { ApiResponse } from "@/lib/api/response";
+import { validateRequest } from "@/lib/api/validate";
 
 // Create building
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const data = BuildingSchema.parse(body);
+    const data = await validateRequest(BuildingSchema, body);
     const {
       name,
       address,
+      location,
       totalFloors,
       totalRoomsOnEachFloor,
       hasGroundFloor,
       description,
+      RoomsImage,
       RoomsCapacities,
       RoomsAmenities,
       RoomsAvailableHours,
     } = data;
 
-    // Helper function to clean and format text (trim & remove extra spaces)
-    const cleanText = (text: string) => text.replace(/\s+/g, " ").trim();
-
     // Normalize building name and address
     const titleCaseName = normalizeName(name);
-    const cleanAddress = cleanText(address);
+    const cleanAddress = address.replace(/\s+/g, " ").trim();
 
     // Check for duplicate building name (case-insensitive)
     const existingName = await prisma.building.findFirst({
@@ -47,7 +46,8 @@ export async function POST(request: NextRequest) {
     if (existingName) {
       return NextResponse.json(
         {
-          error: `Cannot create building with name '${titleCaseName}': It already exists`,
+          success: false,
+          message: `Cannot create building with name '${titleCaseName}': It already exists`,
         },
         { status: 400 }
       );
@@ -59,6 +59,7 @@ export async function POST(request: NextRequest) {
         data: {
           name: titleCaseName,
           address: cleanAddress,
+          location,
           totalFloors,
           hasGroundFloor,
           description,
@@ -96,10 +97,10 @@ export async function POST(request: NextRequest) {
               data: {
                 floorId: floor.id,
                 name: getRoomName(building.name, floor.floorNumber, i),
-                capacity: RoomsCapacities ?? defaultRoomValues.capacities,
-                amenities: RoomsAmenities ?? defaultRoomValues.amenities,
-                availableHours:
-                  RoomsAvailableHours ?? defaultRoomValues.available_hours,
+                imageUrl: RoomsImage,
+                capacity: RoomsCapacities,
+                amenities: RoomsAmenities,
+                availableHours: RoomsAvailableHours,
               },
             })
           )
@@ -114,16 +115,16 @@ export async function POST(request: NextRequest) {
       return updateBuilding;
     });
 
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        message: "Building was successfully created",
-        building: FormattedDateDisplay(building),
-      },
-      { status: 201 }
+        message: `Successfully created building ${building!.name}`,
+        data: FormattedDateDisplay(building),
+        status: 201,
+      }  
     );
   } catch (error) {
     console.error("Create building failed:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }
 
@@ -133,41 +134,33 @@ export async function GET() {
     const buildings = await prisma.building.findMany({
       orderBy: { name: "asc" },
     });
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        success: true,
-        AllBuildings: FormattedDateDisplay(buildings),
+        message: "Successfully get all buildings",
+        data: FormattedDateDisplay(buildings),
       }, 
-      { status: 200 }
     );
   } catch (error) {
-    console.error("Error fetching buildings:", error);
-    return NextResponse.json(
-      { error: "Failed to retrieve buildings" },
-      { status: 500 }
-    );
+    console.error("Error fetching all buildings:", error);
+    return ApiResponse.error(error);
   }
 }
 
 // Delete all buildings
 export async function DELETE(_: NextRequest) {
   try {
-    // Delete all buildings
-    await prisma.building.deleteMany();
-    const buildings = await prisma.building.findMany();
-    return NextResponse.json(
+    const [, buildings] = await Promise.all([
+      prisma.building.deleteMany(),
+      prisma.building.findMany(),
+    ]);
+    return ApiResponse.success(
       { 
-        success: true,
         message: "All buildings were successfully deleted",
-        buildings 
+        data: buildings, 
       },
-      { status: 200 }
     );
   } catch (error) {
-    console.error("Error deleting buildings:", error);
-    return NextResponse.json(
-      { error: "Failed to delete buildings" },
-      { status: 500 }
-    );
+    console.error("Error deleting all buildings:", error);
+    return ApiResponse.error(error);
   }
 }

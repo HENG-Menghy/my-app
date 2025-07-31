@@ -44,7 +44,7 @@ export class ApiResponse {
       })
     }
 
-    Logger.error('API_ERROR', error as Error)
+    Logger.error('UNEXPECTED_API_ERROR', error as Error)
 
     return NextResponse.json({
       success: false,

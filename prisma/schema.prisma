@@ -238,6 +238,7 @@ model Building {
   id String @id @default(uuid())
   name String @unique @db.VarChar(255)
   address String
+  location String?
   totalFloors Int
   totalRooms Int? @default(0)
   hasGroundFloor Boolean @default(false)

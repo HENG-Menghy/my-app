@@ -4,7 +4,17 @@ import { NextRequest } from "next/server";
 import { UAParser } from "ua-parser-js";
 import { Logger } from "../logger";
 
-export function getClientInfo(request: NextRequest) {
+export function getClientInfo(request: NextRequest): {
+  ipAddress: string;
+  userAgent: string;
+  deviceInfo: {
+    type: string;
+    vendor: string;
+    model: string;
+    os: string;
+    browser: string;
+  };
+} {
   try {
     const userAgentString = request.headers.get("user-agent");
     const forwarded = request.headers.get("x-forwarded-for");
@@ -22,14 +32,18 @@ export function getClientInfo(request: NextRequest) {
           type: `localhost ${result.device.type ?? "device_type"}`,
           vendor: `localhost ${result.device.vendor ?? "device_vendor"}`,
           model: `localhost ${result.device.model ?? "device_model"}`,
-          os: `localhost ${result.os.name ?? "os"} ${result.os.version ?? "version"}`,
-          browser: `localhost ${result.browser.name ?? "browser"} ${result.browser.version ?? "version"}`,
+          os: `localhost ${result.os.name ?? "os"} ${
+            result.os.version ?? "version"
+          }`,
+          browser: `localhost ${result.browser.name ?? "browser"} ${
+            result.browser.version ?? "version"
+          }`,
         },
       };
-    };
+    }
 
     return {
-      ipAddress: ip,
+      ipAddress: ip!,
       userAgent: userAgentString ?? "Unknown",
       deviceInfo: {
         type: result.device.type ?? "Unknown",

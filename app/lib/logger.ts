@@ -44,7 +44,7 @@ export class Logger {
     metadata?: LogMetadata,
     user?: string
   ): LogEntry {
-    const timestamp = fromUTCToLocal(new Date()).toFormat("yyyy LLL dd hh:mm:ss a");
+    const timestamp = fromUTCToLocal(new Date()).toFormat("yyyy-LLL-dd hh:mm:ss a");
     const maskedMetadata = metadata
       ? this.maskSensitiveData(metadata)
       : undefined;
@@ -170,7 +170,7 @@ export class Logger {
       ...metadata,
       event,
       user: process.env.CURRENT_USER || "system",
-      timestamp: fromUTCToLocal(new Date()),
+      timestamp: fromUTCToLocal(new Date()).toFormat("yyyy-LLL-dd hh:mm:ss a"),
     };
 
     // Always hash security logs

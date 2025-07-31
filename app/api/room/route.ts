@@ -3,19 +3,20 @@
 import prisma from "@/lib/db/prisma";
 import { NextRequest, NextResponse } from "next/server";
 import { RoomSchema } from "@/lib/validations/room";
-import { HandleZodError } from "@/utils/validationError";
 import { LocalToUTC, fromUTCToLocal } from "@/utils/datetime";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
 import { getRoomName } from "@/utils/generateRoomName";
 import { normalizeName } from "@/utils/normalizeName";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
 import { z } from "zod";
+import { validateRequest } from "@/lib/api/validate";
+import { ApiResponse } from "@/lib/api/response";
+import { BookingStatus } from "@prisma/client";
 
 // CREATE Room
 export async function POST(request: NextRequest) {
   try {
     let body = await request.json();
-    const data = RoomSchema.parse(body);
+    const data = await validateRequest(RoomSchema, body);
     const { floorId } = data;
 
     // Ensure the provided floor exists and retrieve its buildingId and floorNumber
@@ -25,8 +26,11 @@ export async function POST(request: NextRequest) {
     });
     if (!existingFloor) {
       return NextResponse.json(
-        { error: "Floor does not exist" },
-        { status: 400 }
+        { 
+          success: false,
+          message: "Floor does not exist", 
+        },
+        { status: 400 },
       );
     }
 
@@ -37,7 +41,10 @@ export async function POST(request: NextRequest) {
     });
     if (!building) {
       return NextResponse.json(
-        { error: "Building for floor does not exist" },
+        { 
+          success: false,
+          message: "Building for floor does not exist", 
+        },
         { status: 400 }
       );
     }
@@ -59,7 +66,8 @@ export async function POST(request: NextRequest) {
       if (duplicateRoom) {
         return NextResponse.json(
           {
-            error: `Cannot create room with name '${cleanedName}': It already exists`,
+            success: false,
+            message: `Cannot create room with name '${cleanedName}': It already exists`,
           },
           { status: 400 }
         );
@@ -81,10 +89,9 @@ export async function POST(request: NextRequest) {
         description: data.description,
         type: data.type,
         status: data.status,
-        capacity: data.capacity ?? defaultRoomValues.capacities,
-        amenities: data.amenities ?? defaultRoomValues.amenities,
-        availableHours:
-          data.availableHours ?? defaultRoomValues.available_hours,
+        capacity: data.capacity,
+        amenities: data.amenities,
+        availableHours: data.availableHours,
       },
     });
 
@@ -111,43 +118,43 @@ export async function POST(request: NextRequest) {
       data: { totalRooms: newRoomCountInBuilding },
     });
 
-    return NextResponse.json(
-      {
-        message: "Room was created successfully",
-        room: {
-          ...room,
-          availableHours: sortAvailableHours(
-            room.availableHours as {
-              dayOfWeek: string;
-              startTime: string;
-              endTime: string;
-            }[]
-          ),
-          createdAt: fromUTCToLocal(room.createdAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-          updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-        },
+    return ApiResponse.success({
+      message: `Room(${room.name}) was successfully created on floor ${existingFloor.floorNumber} of building ${building.name}`,
+      data: {
+        ...room,
+        availableHours: sortAvailableHours(
+          room.availableHours as {
+            dayOfWeek: string;
+            startTime: string;
+            endTime: string;
+          }[]
+        ),
+        createdAt: fromUTCToLocal(room.createdAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+        updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
       },
-      { status: 201 }
-    );
+      status: 201,
+    });
   } catch (error: unknown) {
     console.error("Room creation error:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }
 
 // DELETE all rooms by floor/building/all; and skipping those with bookings
 export async function DELETE(request: NextRequest) {
   try {
-    const validIds = z.object({
-      floorId: z.string().uuid().optional(),
-      buildingId: z.string().uuid().optional(),
-    }).strict();
+    const validIds = z
+      .object({
+        floorId: z.string().uuid().optional(),
+        buildingId: z.string().uuid().optional(),
+      })
+      .strict();
     const body = await request.json();
-    const { floorId, buildingId } = validIds.parse(body);
+    const { floorId, buildingId } = await validateRequest(validIds, body);
 
     // Build the filter
     const filter: Record<string, any> = {};
@@ -155,7 +162,10 @@ export async function DELETE(request: NextRequest) {
     // Allow only one criteria (floorId, or buildingId, or neither)
     if (floorId && buildingId) {
       return NextResponse.json(
-        { error: "Provide only one: either floorId or buildingId, not both." },
+        { 
+          success: false,
+          message: "Provide only one: either floorId or buildingId, not both" 
+        },
         { status: 400 }
       );
     }
@@ -179,27 +189,33 @@ export async function DELETE(request: NextRequest) {
 
     if (candidateRooms.length === 0) {
       return NextResponse.json(
-        { message: "No rooms found matching criteria" },
+        { 
+          success: false,
+          message: "No rooms found matching criteria" 
+        },
         { status: 404 }
       );
     }
 
     const deletedRooms: string[] = [];
-    const skippedRooms: { name: string; reason: string }[] = [];
+    const skippedRooms: string[] = [];
     const deletableRoomIds: string[] = [];
+    
+    // Get room IDs with approved bookings in a single query
+    const approvedBookings = await prisma.booking.findMany({
+      where: {
+        roomId: { in: candidateRooms.map(r => r.id) },
+        status: BookingStatus.approved,
+      },
+      select: { roomId: true },
+      distinct: ['roomId'],
+    });
 
-    // Check if each room has any bookings
+    // Create a Set for quick lookup
+    const roomsWithApprovedBookings = new Set(approvedBookings.map((b) => b.roomId));
     for (const room of candidateRooms) {
-      const hasAnyBookings = await prisma.booking.findFirst({
-        where: { roomId: room.id },
-        select: { id: true },
-      });
-
-      if (hasAnyBookings) {
-        skippedRooms.push({
-          name: room.name!,
-          reason: "Room contains one or more bookings",
-        });
+      if (roomsWithApprovedBookings.has(room.id)) {
+        skippedRooms.push(room.name!)
       } else {
         deletableRoomIds.push(room.id);
         deletedRooms.push(room.name!);
@@ -249,20 +265,16 @@ export async function DELETE(request: NextRequest) {
       });
     }
 
-    return NextResponse.json(
-      {
-        message: `Deleted ${deletedRooms.length} room(s), skipped ${skippedRooms.length} room(s).`,
-        deletedRooms,
-        skippedRooms,
+    return ApiResponse.success({
+      message: `Successfully deleted ${deletedRooms.length} room(s)${skippedRooms.length > 0 ? `; skipped ${skippedRooms.length} room(s) because of containing some active bookings` : ''}`,
+      data: {
+        "deletedRoom(s)": deletedRooms,
+        "skippedRoom(s)": skippedRooms,
       },
-      { status: 200 }
-    );
+    });
   } catch (error) {
     console.error("Room bulk deletion error:", error);
-    return NextResponse.json(
-      { error: "Failed to delete rooms" },
-      { status: 500 }
-    );
+    return ApiResponse.error(error);
   }
 }
 
@@ -292,9 +304,45 @@ export async function GET(request: NextRequest) {
     // Build initial room filter
     const filter: Record<string, any> = {};
 
+    let floorNumber: number;
+    let buildingName: string;
     if (floorId) {
+      const floor = await prisma.floor.findUnique({
+        where: { id: floorId },
+        select: {
+          floorNumber: true,
+          building: {
+            select: { name: true },
+          },
+        },
+      });
+      if(!floor) {
+        return NextResponse.json(
+          { 
+            success: false,
+            message: "The provided floorId param does not exist for any floor" 
+          },
+          { status: 400 },
+        );
+      }
+      floorNumber = floor.floorNumber;
+      buildingName = floor.building.name;
       filter.floorId = floorId;
     } else if (buildingId) {
+      const building = await prisma.building.findUnique({
+        where: { id: buildingId },
+        select: { name: true },
+      });
+      if(!building) {
+        return NextResponse.json(
+          { 
+            success: false,
+            message: "The provided buildingId param does not exist for any building" 
+          },
+          { status: 400 },
+        );
+      }
+      buildingName = building.name;
       filter.floor = { buildingId };
     }
 
@@ -345,10 +393,16 @@ export async function GET(request: NextRequest) {
       return true;
     });
 
-    return NextResponse.json(
-      {
-        success: true,
-        total: availableRooms.length,
+    return ApiResponse.success({
+      message: `Successfully get all(${availableRooms.length}) room(s)${`${ floorId
+          ? ` belong to floor ${floorNumber!} of building ${buildingName!}`
+          : ''
+        }${ buildingId 
+          ? ` in building ${buildingName!}` 
+          : ''
+        }`
+      }`,
+      data: {
         availableRooms: availableRooms.map((room) => ({
           id: room.id,
           floorId: room.floorId,
@@ -364,7 +418,7 @@ export async function GET(request: NextRequest) {
               startTime: string;
               endTime: string;
             }[]
-          ),        
+          ),
           description: room.description,
           createdAt: fromUTCToLocal(room.createdAt).toFormat(
             "yyyy-LLL-dd hh:mm:ss a"
@@ -374,10 +428,9 @@ export async function GET(request: NextRequest) {
           ),
         })),
       },
-      { status: 200 }
-    );
+    });
   } catch (error) {
     console.error("Room search failed:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }

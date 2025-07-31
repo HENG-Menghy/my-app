@@ -1,7 +1,8 @@
 // @/api/building/deleteMany/route.ts
 
+import { ApiResponse } from "@/lib/api/response";
+import { validateRequest } from "@/lib/api/validate";
 import prisma from "@/lib/db/prisma";
-import { HandleZodError } from "@/utils/validationError";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -10,9 +11,9 @@ export async function DELETE(request: NextRequest) {
   try {
     const validBuildingIds = z.array(z.string().uuid()).nonempty();
     const body = await request.json();
-    const buildingIds = validBuildingIds.parse(body);
+    const buildingIds = await validateRequest(validBuildingIds, body);
     
-    // Retrieve buildings, floors, and rooms including booking
+    // Retrieve buildings
     const buildings = await prisma.building.findMany({
       where: { id: { in: buildingIds } },
       select: { id: true, name: true },
@@ -21,7 +22,10 @@ export async function DELETE(request: NextRequest) {
     // Ensure all provided IDs match existing buildings
     if (buildings.length !== buildingIds.length) {
       return NextResponse.json(
-        { error: "Some building IDs do not exist" },
+        { 
+          success: false,
+          message: "Some building ID(s) do not exist" 
+        },
         { status: 400 }
       );
     }
@@ -29,17 +33,17 @@ export async function DELETE(request: NextRequest) {
     // Delete buildings
     await prisma.building.deleteMany({ where: { id: { in: buildingIds } } });
 
-    return NextResponse.json(
+    return ApiResponse.success(
       {
-        success: true,
-        message: `${buildingIds.length} buildings were successfully deleted`,
-        deletedIds: buildingIds,
-        deletedBuildings: buildings.map(b => b.name),
+        message: `${buildingIds.length} building(s) were successfully deleted`,
+        data: {
+          "deletedId(s)": buildingIds,
+          "deletedBuilding(s)": buildings.map(b => b.name),
+        },
       },
-      { status: 200 }
     );
   } catch (error) {
     console.error("Error deleting buildings:", error);
-    return HandleZodError(error);
+    return ApiResponse.error(error);
   }
 }

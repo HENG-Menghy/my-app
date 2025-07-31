@@ -2,7 +2,7 @@
 
 export const defaultRoomValues = {
   capacities: 12,
-  amenities: ["projector", "whiteboard", "air-conditioned"],
+  amenities: ["projector", "whiteboard", "air-conditioned"] as [string, ...string[]],
   available_hours: [
     { dayOfWeek: "monday", startTime: "08:00", endTime: "17:00" }, 
     { dayOfWeek: "tuesday", startTime: "08:00", endTime: "17:00" },
@@ -11,5 +11,17 @@ export const defaultRoomValues = {
     { dayOfWeek: "friday", startTime: "08:00", endTime: "17:00" },
     { dayOfWeek: "saturday", startTime: "08:00", endTime: "17:00" },
     { dayOfWeek: "sunday", startTime: "00:00", endTime: "00:00" }
-  ],
+  ] as {
+    dayOfWeek:
+      | "monday"
+      | "tuesday"
+      | "wednesday"
+      | "thursday"
+      | "friday"
+      | "saturday"
+      | "sunday";
+    startTime: string;
+    endTime: string;
+  }[],
+  image_url: "https://zlowucgjecrlilkyoamr.supabase.co/storage/v1/object/public/images-bucket/rooms/default_room.jpg",
 }
