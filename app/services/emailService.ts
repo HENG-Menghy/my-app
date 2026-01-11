@@ -2,18 +2,21 @@
 
 import { smtp } from "@/lib/email/config";
 import { Logger } from "@/lib/logger";
-import { AUTH_CONSTANTS } from "@/lib/auth/constants";
 import type {
   EmailData,
-  OTPEmailData,
+  VerificationEmailData,
   WelcomeEmailData,
   PasswordResetEmailData,
+  LoginAlertEmailData,
+  AccountRemovalEmailData,
 } from "@/types/email";
 import { fromUTCToLocal } from "@/utils/datetime";
+import { getTimeDifference } from "@/utils/getTimeDifference";
+import { maskEmail } from "@/utils/maskEmail";
 
 class EmailService {
   private retryAttempts = 3;
-  private retryDelay = 2000; // 2 seconds
+  private retryDelay = 3000; // 3 seconds
 
   private async sendWithRetry(
     mailOptions: EmailData,
@@ -21,41 +24,47 @@ class EmailService {
   ): Promise<void> {
     try {
       // In development without force send, just log
-      if (process.env.NODE_ENV === "development" && process.env.SMTP_FORCE_SEND !== "true") {
+      if (
+        process.env.NODE_ENV === "development" &&
+        process.env.SMTP_FORCE_SEND === "false"
+      ) {
         Logger.debug("EMAIL_DEVELOPMENT_MODE", {
-          to: mailOptions.to,
+          from: `${process.env.NEXT_PUBLIC_APP_NAME} <${process.env.SMTP_USER}>`,
+          to: maskEmail(mailOptions.to),
           subject: mailOptions.subject,
           text: mailOptions.text,
           headers: {
-            'X-Environment': process.env.NODE_ENV === 'development' ? 'Development' : 'Production',
-            'X-Timestamp': fromUTCToLocal(new Date()).toFormat("yyyy LLL dd hh:mm:ss a"),
-            'Message-ID': `${Date.now()}.${Math.random().toString(36).substring(2)}@${process.env.SMTP_HOST}`
-          }
+            "X-Environment":
+              process.env.NODE_ENV === "development"
+                ? "Development"
+                : "Production",
+            "X-Timestamp": fromUTCToLocal(new Date()).toFormat(
+              "yyyy-LLL-dd hh:mm:ss a"
+            ),
+            "Message-ID": `${Date.now()}-${Math.random()
+              .toString(36)
+              .substring(2)}@${process.env.SMTP_HOST}`,
+          },
+          actor: "System",
         });
         return;
       }
 
       // Attempt to send mail
       await smtp.sendMail({
-        from: `${process.env.APP_NAME} <${process.env.SMTP_USER}>`,
+        from: `${process.env.NEXT_PUBLIC_APP_NAME} <${process.env.SMTP_USER}>`,
         to: mailOptions.to,
         subject: mailOptions.subject,
         html: mailOptions.html,
-        headers: {
-          'X-Environment': process.env.NODE_ENV === 'development' ? 'Development' : 'Production',
-          'X-Timestamp': fromUTCToLocal(new Date()).toFormat("yyyy LLL dd hh:mm:ss a"),
-          'Message-ID': `${Date.now()}.${Math.random().toString(36).substring(2)}@${process.env.SMTP_HOST}`
-        }
       });
-
     } catch (error) {
-      Logger.error("EMAIL_SEND_ERROR", error as Error, {
+      Logger.error("EMAIL_SERVICE_SEND_ERROR", error as Error, {
         attempt,
         to: mailOptions.to,
         subject: mailOptions.subject,
       });
 
-      // Retry if we haven't exceeded max attempts
+      // Retry if haven't exceeded max attempts
       if (attempt < this.retryAttempts) {
         await new Promise((resolve) =>
           setTimeout(resolve, this.retryDelay * attempt)
@@ -67,20 +76,9 @@ class EmailService {
     }
   }
 
-  async sendVerificationEmail(
-    email: string,
-    otp: string,
-    fullname?: string
-  ): Promise<void> {
-    const data: OTPEmailData = {
-      email,
-      otp,
-      fullname,
-      expiresInMinutes: AUTH_CONSTANTS.OTP_EXPIRY / 60,
-    };
-
+  async sendVerificationEmail(data: VerificationEmailData): Promise<void> {
     await this.sendWithRetry({
-      to: email,
+      to: data.email,
       subject: "Verify Your Email Address",
       text: this.generateVerificationEmailText(data),
       html: this.generateVerificationEmailHtml(data),
@@ -90,7 +88,7 @@ class EmailService {
   async sendWelcomeEmail(data: WelcomeEmailData): Promise<void> {
     await this.sendWithRetry({
       to: data.email,
-      subject: `Welcome to ${process.env.APP_NAME}`,
+      subject: `Welcome to ${process.env.NEXT_PUBLIC_APP_NAME}`,
       text: this.generateWelcomeEmailText(data),
       html: this.generateWelcomeEmailHtml(data),
     });
@@ -105,77 +103,58 @@ class EmailService {
     });
   }
 
-  async sendAccountLockedEmail(email: string, fullname: string): Promise<void> {
+  async sendLoginAlertEmail(data: LoginAlertEmailData): Promise<void> {
     await this.sendWithRetry({
-      to: email,
-      subject: "Account Security Alert",
-      text: this.generateAccountLockedEmailText(fullname),
-      html: this.generateAccountLockedEmailHtml(fullname),
-    });
-  }
-
-  async sendLoginAlertEmail(
-    email: string,
-    fullname: string,
-    loginInfo: {
-      time: string;
-      ipAddress?: string
-      userAgent?:string;
-      location?: {
-        country: string;
-        city: string;
-      }
-      os?: string;
-      browser?: string;
-    }
-  ): Promise<void> {
-    await this.sendWithRetry({
-      to: email,
+      to: data.email,
       subject: "New Login Detected",
-      text: this.generateLoginAlertEmailText(fullname, loginInfo),
-      html: this.generateLoginAlertEmailHtml(fullname, loginInfo),
+      text: this.generateLoginAlertEmailText(data),
+      html: this.generateLoginAlertEmailHtml(data),
     });
   }
 
-  private generateVerificationEmailHtml(data: OTPEmailData): string {
+  async sendAccountRemovalEmail(data: AccountRemovalEmailData): Promise<void> {
+    await this.sendWithRetry({
+      to: data.email,
+      subject: "Account Removed",
+      text: this.generateAccountRemovalEmailText(data),
+      html: this.generateAccountRemovalEmailHtml(data),
+    });
+  }
+
+  private generateVerificationEmailHtml(data: VerificationEmailData): string {
     const content = `
       <h2 class="title">Verify Your Email Address</h2>
       <p class="text">Hello there,</p>
       <p class="text">Use the code below to complete your sign-up process:</p>
       <div class="code">${data.otp}</div>
-      <p class="text">The code is valid for <strong>${
-        data.expiresInMinutes
-      } minute</strong>.</p>
+      <p class="text">The code is valid for <strong>${getTimeDifference(
+        data.expiry
+      )}</strong>. </p>
       <div class="alert">
-        <strong>Security Tip:</strong> If you didn't request this code, you can safely ignore this message.
+        <strong>Security Notice:</strong> If you did not request this code, please ignore this email. No further action is required.
       </div>
     `;
     return this.generateEmailLayout(content);
   }
 
-  private generateVerificationEmailText(data: OTPEmailData): string {
+  private generateVerificationEmailText(data: VerificationEmailData): string {
     return `
-Hello ${data.fullname || "there"},
-
+Hello there,
 Please use the following verification code to complete your registration:
-
 ${data.otp}
-
-This code will expire in ${data.expiresInMinutes} minute.
-
-Security Notice: If you didn't request this code, please ignore this email.
-
+This code will expire in ${getTimeDifference(data.expiry)}.
+Security Notice: If you did not request this code, please ignore this email. No further action is required.
 Best regards,
-${process.env.APP_NAME} Team
+${process.env.NEXT_PUBLIC_APP_NAME} Team
     `.trim();
   }
 
   private generateWelcomeEmailHtml(data: WelcomeEmailData): string {
     const content = `
-      <h2 class="title">Welcome to ${process.env.APP_NAME}!</h2>
+      <h2 class="title">Welcome to ${process.env.NEXT_PUBLIC_APP_NAME}!</h2>
       <p class="text">Hello ${data.fullname},</p>
-      <p class="text">Thanks for signing up. Your account has been successfully created and now you can login to the platform.</p>
-      <p class="text">Here’s what you can do with ${process.env.APP_NAME}:</p>
+      <p class="text">Thanks for signing up. Your account has been successfully created and now you can login for your account.</p>
+      <p class="text">Here’s what you can do with <strong> ${process.env.NEXT_PUBLIC_APP_NAME} </strong> web application:</p>
       <ul class="text" style="padding-left: 20px; margin-bottom: 16px;">
         <li>✔️ Make or cancel a booking before it is approved </li>
         <li>✔️ Request to cancel your booking after it has been approved </li>
@@ -206,24 +185,20 @@ ${process.env.APP_NAME} Team
 
   private generateWelcomeEmailText(data: WelcomeEmailData): string {
     return `
-Welcome to ${process.env.APP_NAME}!
-
+Welcome to ${process.env.NEXT_PUBLIC_APP_NAME}!
 Hello ${data.fullname},
-
-Thank you for joining ${process.env.APP_NAME}. Your account has been successfully created.
-
-You can now login to our platform and can access features:
+Thanks for your registering with ${process.env.NEXT_PUBLIC_APP_NAME}!
+Your account has been successfully created. You can now log in and start using the platform.
+Here are some features you can access:
 - Make or cancel a booking before it is approved 
 - Request to cancel your booking after it has been approved
 - View your booking history
 - View your meeting history
 - View or update your profile
 - Change or reset password
-
 Get started here: ${process.env.NEXT_PUBLIC_BASE_URL}
-
 Best regards,
-${process.env.APP_NAME} Team
+${process.env.NEXT_PUBLIC_APP_NAME} Team
     `.trim();
   }
 
@@ -233,12 +208,12 @@ ${process.env.APP_NAME} Team
       <p class="text">Hello ${data.fullname},</p>
       <p class="text">We received a request to reset your password.</p>
       <p class="text">Use the following code below to process resetting your password:</p>
-      <div class="code"> ${data.resetCode} </div>
+      <div class="code"> ${data.otp} </div>
       <p class="text" style="margin-top: 20px;">
-        This code will expire in ${data.expiresInMinutes} minute.
+        This code will expire in  ${getTimeDifference(data.expiry)}.
       </p>
       <div class="alert">
-        <strong>Security Notice:</strong> If you didn’t request this reset, please contact our support team immediately.
+        <strong>Security Notice:</strong> If you did not request this code, you can safely ignore this message.
       </div>
     `;
     return this.generateEmailLayout(content);
@@ -247,107 +222,44 @@ ${process.env.APP_NAME} Team
   private generatePasswordResetEmailText(data: PasswordResetEmailData): string {
     return `
 Hello ${data.fullname},
-
 We received a request to reset your password.
-
-Your password reset code is: ${data.resetCode}
-
-This code will expire in ${data.expiresInMinutes} minute.
-
-Security Notice: If you didn't request this password reset, please contact support immediately.
-
+To reset your password, please use the following code: ${data.otp}
+This code will expire in  ${getTimeDifference(data.expiry)}.
+Security Notice: If you did not request this password reset, you can safely ignore this message.
 Best regards,
-${process.env.APP_NAME} Team
+${process.env.NEXT_PUBLIC_APP_NAME} Team
     `.trim();
   }
 
-  private generateAccountLockedEmailHtml(fullname: string): string {
-    const content = `
-      <h2 style="font-size: 20px; font-weight: 600; margin-bottom: 16px;">Account Security Alert</h2>
-      <p style="margin: 0 0 12px;">Hello ${fullname},</p>
-      <p style="margin: 0 0 12px;">Your account has been temporarily locked due to multiple failed login attempts.</p>
-      <p style="margin: 0 0 12px;">If this was you, you can try again after 2 hours.</p>
-      <p style="margin: 0 0 12px;">If you didn't attempt to log in, we recommend taking the following steps:</p>
-      <ul style="margin: 0 0 12px 16px; padding: 0;">
-        <li style="margin-bottom: 8px;">Change your password immediately</li>
-        <li style="margin-bottom: 8px;">Review your recent account activity</li>
-      </ul>
-      <div style="
-        background-color: #fff3cd;
-        border: 1px solid #ffeeba;
-        color: #856404;
-        padding: 15px;
-        border-radius: 4px;
-        margin-top: 20px;
-      ">
-        <strong>Need help?</strong> Contact our support team immediately if you notice any suspicious activity.
-      </div>
-    `;
-    return this.generateEmailLayout(content);
-  }
-
-  private generateAccountLockedEmailText(fullname: string): string {
-    return `
-Hello ${fullname},
-
-Your account has been temporarily locked due to multiple failed login attempts.
-
-If this was you, you can try again after 2 hours.
-
-If you didn't attempt to log in, we recommend:
-- Changing your password immediately
-- Reviewing your recent account activity
-
-Need help? Contact our support team immediately if you notice any suspicious activity.
-
-Best regards,
-${process.env.APP_NAME} Team
-    `.trim();
-  }
-
-  private generateLoginAlertEmailHtml(
-    fullname: string,
-    loginInfo: {
-      time: string;
-      ipAddress?: string;
-      userAgent?: string;
-      location?:{
-        country: string;
-        city: string;
-      }
-      os?: string;
-      browser?: string;
-    }
-  ): string {
+  private generateLoginAlertEmailHtml(data: LoginAlertEmailData): string {
+    const {
+      fullname,
+      loginInfo: { time, device, os, browser, location },
+    } = data;
     const content = `
       <h2 style="font-size: 20px; font-weight: 600; margin-bottom: 16px;">New Login Detected</h2>
       <p style="margin: 0 0 12px;">Hello ${fullname},</p>
       <p style="margin: 0 0 12px;">We detected a new login to your account with the following details:</p>
       <ul style="margin: 0 0 12px 16px; padding: 0;">
-        <li style="margin-bottom: 8px;">Time: ${fromUTCToLocal(loginInfo.time).toFormat("yyyy LLL dd hh:mm:ss a")}</li>
+        <li style="margin-bottom: 8px;">Time: ${fromUTCToLocal(time).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        )}</li>
         ${
-          loginInfo.ipAddress
-            ? `<li style="margin-bottom: 8px;">IP Address: ${loginInfo.ipAddress}</li>`
+          location
+            ? `<li style="margin-bottom: 8px;">Location: ${location.city}, ${location.country}</li>`
             : ""
         }
         ${
-          loginInfo.location
-            ? `<li style="margin-bottom: 8px;">Location: ${loginInfo.location.city}, ${loginInfo.location.country}</li>`
+          os
+            ? `<li style="margin-bottom: 8px;">Operating System: ${os}</li>`
             : ""
         }
         ${
-          loginInfo.os
-            ? `<li style="margin-bottom: 8px;">OS: ${loginInfo.os}</li>`
-            : ""
+          device ? `<li style="margin-bottom: 8px;">Device: ${device}</li>` : ""
         }
         ${
-          loginInfo.browser
-            ? `<li style="margin-bottom: 8px;">Browser: ${loginInfo.browser}</li>`
-            : ""
-        }
-        ${
-          loginInfo.userAgent
-            ? `<li style="margin-bottom: 8px;">User Agent: ${loginInfo.userAgent}</li>`
+          browser
+            ? `<li style="margin-bottom: 8px;">Browser: ${browser}</li>`
             : ""
         }
       </ul>
@@ -359,53 +271,68 @@ ${process.env.APP_NAME} Team
         border-radius: 4px;
         margin-top: 20px;
       ">
-        <strong>Wasn't you?</strong> If you don't recognize this login, please change your password immediately and contact support.
+        <strong>Wasn't you?</strong> If this login attempt was not made by you, we recommend resetting your password and ending any active sessions you do not recognize.
       </div>
     `;
     return this.generateEmailLayout(content);
   }
 
-  private generateLoginAlertEmailText(
-    fullname: string,
-    loginInfo: {
-      time: string;
-      ipAddress?: string;
-      userAgent?: string;
-      location?:{
-        country: string;
-        city: string;
-      }
-      os?: string;
-      browser?: string;
-    }
-  ): string {
+  private generateLoginAlertEmailText(data: LoginAlertEmailData): string {
+    const {
+      fullname,
+      loginInfo: { time, device, os, browser, location },
+    } = data;
     return `
 Hello ${fullname},
-
 We detected a new login to your account with the following details:
-
-Time: ${fromUTCToLocal(loginInfo.time).toFormat("yyyy LLL dd hh:mm:ss a")}
-${loginInfo.ipAddress ? `IP Address: ${loginInfo.ipAddress}` : ""}
-${loginInfo.location ? `Location: ${loginInfo.location.city}, ${loginInfo.location.country}` : ""}
-${loginInfo.os ? `OS: ${loginInfo.os}` : ""}
-${loginInfo.browser ? `Browser: ${loginInfo.browser}` : ""}
-${loginInfo.userAgent ? `UserAgent: ${loginInfo.userAgent}` : ""}
-
-Security Notice: If you don't recognize this login, please change your password immediately and contact support.
-
+Time: ${fromUTCToLocal(time).toFormat("yyyy-LLL-dd hh:mm:ss a")}
+${location ? `Location: ${location.city}, ${location.country}` : ""}
+${os ? `Operating System: ${os}` : ""}
+${device ? `Device: ${device}` : ""}
+${browser ? `Browser: ${browser}` : ""}
+If this login attempt was not made by you, we recommend resetting your password and ending any active sessions you do not recognize.
 Best regards,
-${process.env.APP_NAME} Team
+${process.env.NEXT_PUBLIC_APP_NAME} Team
+    `.trim();
+  }
+
+  private generateAccountRemovalEmailHtml(data: AccountRemovalEmailData): string {
+    const content = `
+      <h2 class="title">Account Removed</h2>
+      <p class="text">Hello ${data.fullname},</p>
+      <p class="text">Your account has been removed from our system.</p>
+      <div class="alert">
+        <strong>Notice:</strong> 
+        You may register a new account with this email after ${getTimeDifference(
+          data.expiry
+        )}.
+        }
+      </div>
+    `;
+    return this.generateEmailLayout(content);
+  }
+
+  private generateAccountRemovalEmailText(data: AccountRemovalEmailData): string {
+    return `
+Hello ${data.fullname},
+Your account has been removed from our system.
+ You may register a new account with this email after ${getTimeDifference(
+   data.expiry
+ )}.
+}
     `.trim();
   }
 
   private generateEmailLayout(content: string): string {
+    const logoUrl =
+      "https://zlowucgjecrlilkyoamr.supabase.co/storage/v1/object/public/images-bucket/logo.png";
     return `
       <!DOCTYPE html>
       <html lang="en">
         <head>
           <meta charset="UTF-8" />
           <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-          <title>${process.env.APP_NAME}</title>
+          <title>${process.env.NEXT_PUBLIC_APP_NAME}</title>
           <style>
             body {
               margin: 0;
@@ -489,13 +416,13 @@ ${process.env.APP_NAME} Team
         <body>
           <div class="container">
             <div class="header">
-              <h2 style="color: #3ecf8e;">${process.env.APP_NAME}</h2>
+              <img src="${logoUrl}" alt="System Logo" style="width: 208px; height: auto;" />
             </div>
             ${content}
             <div class="footer">
               <p>This is an automated message. Please do not reply.</p>
               <p>© ${new Date().getFullYear()} ${
-      process.env.APP_NAME
+      process.env.NEXT_PUBLIC_APP_NAME
     }. All rights reserved.</p>
             </div>
           </div>

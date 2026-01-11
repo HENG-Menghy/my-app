@@ -9,7 +9,7 @@ const Logo = ({width, height} : {width: string, height: string}) => {
       <Image
         src={logoImg}
         alt="System Logo"
-        className={`${width} ${height} animate-subtle-saturate`}
+        className={`${width} ${height}`}
         priority
       />
     </>

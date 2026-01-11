@@ -1,7 +1,6 @@
 // @/lib/logger.ts
 
 import { fromUTCToLocal } from "@/utils/datetime";
-import { createHash } from "crypto";
 
 type LogLevel = "info" | "error" | "warn" | "debug";
 
@@ -25,17 +24,14 @@ const IS_PROD = process.env.NODE_ENV === "production";
 export class Logger {
   // Sensitive fields that should be masked in logs
   private static readonly SENSITIVE_FIELDS = [
-    "password",
-    "token",
+    "uid",
+    "sid",
     "accessToken",
     "refreshToken",
-    "secret",
-    "apiKey",
-    "email",
-    "phonenumber",
     "otp",
-    "ssn",
-    "creditCard",
+    "password",
+    // "actor",
+    // "text",
   ];
 
   private static formatMessage(
@@ -54,16 +50,8 @@ export class Logger {
       level,
       message,
       metadata: maskedMetadata,
-      user: user || "system",
+      user: user,
     };
-
-    // Add hash for sensitive logs in production
-    if (
-      IS_PROD &&
-      (level === "error" || this.containsSensitiveData(metadata))
-    ) {
-      logEntry.hash = this.generateLogHash(logEntry);
-    }
 
     return logEntry;
   }
@@ -90,25 +78,6 @@ export class Logger {
     }
 
     return masked;
-  }
-
-  private static containsSensitiveData(data?: any): boolean {
-    if (!data) return false;
-    if (typeof data !== "object") return false;
-
-    return Object.keys(data).some((key) =>
-      this.SENSITIVE_FIELDS.some((field) => key.toLowerCase().includes(field))
-    );
-  }
-
-  private static generateLogHash(logEntry: LogEntry): string {
-    const dataToHash = JSON.stringify({
-      timestamp: logEntry.timestamp,
-      message: logEntry.message,
-      metadata: logEntry.metadata,
-    });
-
-    return createHash("sha256").update(dataToHash).digest("hex");
   }
 
   private static writeLog(logEntry: LogEntry) {
@@ -149,7 +118,6 @@ export class Logger {
       error: {
         name: error.name,
         message: error.message,
-        stack: error.stack,
       },
     };
     this.writeLog(this.formatMessage("error", message, errorMetadata));
@@ -163,25 +131,6 @@ export class Logger {
     if (ENV !== "production") {
       this.writeLog(this.formatMessage("debug", message, metadata));
     }
-  }
-
-  static security(event: string, metadata?: LogMetadata) {
-    const securityMetadata = {
-      ...metadata,
-      event,
-      user: process.env.CURRENT_USER || "system",
-      timestamp: fromUTCToLocal(new Date()).toFormat("yyyy-LLL-dd hh:mm:ss a"),
-    };
-
-    // Always hash security logs
-    const logEntry = this.formatMessage(
-      "info",
-      `SECURITY_EVENT: ${event}`,
-      securityMetadata
-    );
-    logEntry.hash = this.generateLogHash(logEntry);
-
-    this.writeLog(logEntry);
   }
 
   static request(

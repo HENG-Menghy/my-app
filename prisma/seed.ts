@@ -1,4 +1,4 @@
-//  /prisma/seed.ts
+//  prisma/seed.ts
 
 import prisma from "@/lib/db/prisma";
 import z from "zod";

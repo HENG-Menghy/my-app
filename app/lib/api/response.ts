@@ -20,7 +20,7 @@ export class ApiResponse {
     })
   }
 
-  static error(error: unknown) {
+  static error(error: any) {
     if (error instanceof AuthError) {
       return NextResponse.json({
         success: false,
@@ -49,7 +49,10 @@ export class ApiResponse {
     return NextResponse.json({
       success: false,
       code: 'INTERNAL_SERVER_ERROR',
-      message: 'An unexpected error occurred'
+      error: {
+        name: error.name,
+        message: error.message,
+      },
     }, {
       status: 500
     })

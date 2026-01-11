@@ -25,7 +25,7 @@ export function normalizeName(name: string): string {
     .map((word, index) => {
       const islinkingWord = linkingWords.has(word.toLowerCase());
       return (index === 0 || !islinkingWord) 
-        ? `${word[0].toUpperCase()}${word.slice(1)}`
+        ? `${word[0].toUpperCase()}${word.toLowerCase().slice(1)}`
         : word.toLowerCase();
     })
     .join(" ");

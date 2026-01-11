@@ -8,12 +8,15 @@ import { normalizeName } from "@/utils/normalizeName";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
 import { ApiResponse } from "@/lib/api/response";
 import { validateRequest } from "@/lib/api/validate";
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, UserRole } from "@prisma/client";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { AvailableHours } from "@/lib/validations/availableHoursSchema";
 
 // GET Single Room
 export async function GET(
   _: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
@@ -51,15 +54,11 @@ export async function GET(
     }
 
     return ApiResponse.success({
-      message: `Successfully get room ${room.name} on ${room.floor.label} of building ${room.floor.building.name}`,
+      message: `Successfully get room ‘${room.name}’ on ‘${room.floor.label}’ of building ‘${room.floor.building.name}’`,
       data: {
         ...room,
         availableHours: sortAvailableHours(
-          room.availableHours as {
-            dayOfWeek: string;
-            startTime: string;
-            endTime: string;
-          }[]
+          room.availableHours as AvailableHours
         ),
         createdAt: fromUTCToLocal(room.createdAt).toFormat(
           "yyyy-LLL-dd hh:mm:ss a"
@@ -88,17 +87,19 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error("Error fetching room:", error);
     return ApiResponse.error(error);
   }
 }
 
 // DELETE Room
 export async function DELETE(
-  _: NextRequest,
-  { params }: { params: { id: string } }
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const { id } = await params;
     const room = await prisma.room.findUnique({
       where: { id },
@@ -120,8 +121,8 @@ export async function DELETE(
     if (room.bookings.some((b) => b.status === BookingStatus.approved)) {
       return NextResponse.json(
         {
-          success: false, 
-          message: `Cannot delete room ${room.name}; it contains approved bookings` 
+          success: false,
+          message: `Cannot delete room ${room.name}; it contains approved bookings`,
         },
         { status: 400 }
       );
@@ -132,7 +133,7 @@ export async function DELETE(
       select: { buildingId: true },
     });
 
-    await prisma.room.delete({ where: { id: params.id } });
+    await prisma.room.delete({ where: { id: id } });
 
     const roomCountOnFloor = await prisma.room.count({
       where: { floor: { id: room?.floorId } },
@@ -153,11 +154,10 @@ export async function DELETE(
     ]);
 
     return ApiResponse.success({
-      message: `Room ${room.name} was deleted successfully`,
-      data: { deletedId: params.id },
+      message: `Room ‘${room.name}’ was deleted successfully`,
+      data: { deletedRoom: { id: id, name: room.name } },
     });
   } catch (error) {
-    console.error("Error deleting room:", error);
     return ApiResponse.error(error);
   }
 }
@@ -165,25 +165,28 @@ export async function DELETE(
 // Update Room
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const roomId = await params.id;
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
+    const { id } = await params;
     const body = await request.json();
     const roomData = await validateRequest(RoomUpdateSchema, body);
     const { name, floorId, availableHours } = roomData;
 
     // Fetch current room details.
     const existingRoom = await prisma.room.findUnique({
-      where: { id: roomId },
+      where: { id },
       select: { id: true, floorId: true, name: true },
     });
     if (!existingRoom) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Room not found" 
-        }, 
+          message: "Room not found",
+        },
         { status: 404 }
       );
     }
@@ -201,9 +204,9 @@ export async function PATCH(
       });
       if (!newFloor) {
         return NextResponse.json(
-          { 
+          {
             success: false,
-            message: "The new floor does not exist" 
+            message: "The new floor does not exist",
           },
           { status: 400 }
         );
@@ -225,7 +228,7 @@ export async function PATCH(
         const duplicateRoom = await prisma.room.findFirst({
           where: {
             name: { equals: cleanedName, mode: "insensitive" },
-            NOT: { id: roomId },
+            NOT: { id },
           },
         });
         if (duplicateRoom) {
@@ -244,12 +247,8 @@ export async function PATCH(
     if (availableHours && availableHours?.length > 0) {
       // Create a map from existing for faster look up
       const hoursMap = new Map<string, any>();
-      const room = await prisma.room.findUnique({ where: { id: roomId } });
-      const oldAvailableHours = room?.availableHours as {
-        dayOfWeek: string;
-        startTime: string;
-        endTime: string;
-      }[];
+      const room = await prisma.room.findUnique({ where: { id } });
+      const oldAvailableHours = room?.availableHours as AvailableHours;
       for (const entry of oldAvailableHours) {
         if (entry?.dayOfWeek) {
           hoursMap.set(entry.dayOfWeek.toLocaleLowerCase(), entry);
@@ -270,13 +269,13 @@ export async function PATCH(
 
     const updatedRoom = await prisma.$transaction(async (tx) => {
       await tx.room.update({
-        where: { id: roomId },
+        where: { id },
         data: roomData,
       });
 
       // Return updated room with fresh availabileHours
       return tx.room.findUnique({
-        where: { id: roomId },
+        where: { id },
         select: {
           id: true,
           floorId: true,
@@ -330,8 +329,8 @@ export async function PATCH(
     return ApiResponse.success({
       message: `${
         floorChanged
-          ? `Successfully moved room ${existingRoom.name} to floor ${floorNumber} of building ${buildingName}`
-          : `Room ${existingRoom.name} was successfully updated`
+          ? `Successfully moved room ‘${existingRoom.name}’ to floor ‘${floorNumber}’ of building ‘${buildingName}’`
+          : `Room ‘${existingRoom.name}’ was updated successfully`
       }`,
       data: {
         ...updatedRoom,
@@ -351,7 +350,6 @@ export async function PATCH(
       },
     });
   } catch (error) {
-    console.error("Error updating room:", error);
     return ApiResponse.error(error);
   }
 }

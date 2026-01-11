@@ -9,10 +9,16 @@ import { getRoomName } from "@/utils/generateRoomName";
 import { BuildingSchema } from "@/lib/validations/building";
 import { ApiResponse } from "@/lib/api/response";
 import { validateRequest } from "@/lib/api/validate";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { UserRole } from "@prisma/client";
 
 // Create building
 export async function POST(request: NextRequest) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const body = await request.json();
     const data = await validateRequest(BuildingSchema, body);
     const {
@@ -115,52 +121,30 @@ export async function POST(request: NextRequest) {
       return updateBuilding;
     });
 
-    return ApiResponse.success(
-      {
-        message: `Successfully created building ${building!.name}`,
-        data: FormattedDateDisplay(building),
-        status: 201,
-      }  
-    );
+    return ApiResponse.success({
+      message: `Building ‘${building!.name}’ was created successfully`,
+      data: FormattedDateDisplay(building),
+      status: 201,
+    });
   } catch (error) {
-    console.error("Create building failed:", error);
     return ApiResponse.error(error);
   }
 }
 
 // Get all buildings
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const buildings = await prisma.building.findMany({
       orderBy: { name: "asc" },
     });
-    return ApiResponse.success(
-      {
-        message: "Successfully get all buildings",
-        data: FormattedDateDisplay(buildings),
-      }, 
-    );
+    return ApiResponse.success({
+      message: "Successfully get all buildings",
+      data: FormattedDateDisplay(buildings),
+    });
   } catch (error) {
-    console.error("Error fetching all buildings:", error);
-    return ApiResponse.error(error);
-  }
-}
-
-// Delete all buildings
-export async function DELETE(_: NextRequest) {
-  try {
-    const [, buildings] = await Promise.all([
-      prisma.building.deleteMany(),
-      prisma.building.findMany(),
-    ]);
-    return ApiResponse.success(
-      { 
-        message: "All buildings were successfully deleted",
-        data: buildings, 
-      },
-    );
-  } catch (error) {
-    console.error("Error deleting all buildings:", error);
     return ApiResponse.error(error);
   }
 }

@@ -1,21 +1,29 @@
 // @/lib/supabase.ts
 
+/**
+ * - Sign up account here
+ * https://supabase.com/dashboard/sign-up?returnTo=%2Forg
+ * 
+ * - Learn how to use Supabase to store and serve files
+ * @Buckets https://supabase.com/docs/guides/storage/quickstart?queryGroups=language&language=dashboard 
+ * @Uploads https://supabase.com/docs/guides/storage/uploads/standard-uploads
+*/
+
 import { createClient } from "@supabase/supabase-js";
-import { randomUUID } from "crypto";
 import { Logger } from "./logger";
 import imageCompression from "browser-image-compression";
 
-// Initialize Supabase Client (Client-Side only)
+// Initialize Supabase Client
 const client = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_ANON_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
 // Bucket name in Supabase Storage
 const BUCKET_NAME = "images-bucket"; 
 
 /**
- * Uploads image file to Supabase Storage with compression and resizing (client-side)
+ * Uploads image file to Supabase Storage with compression and resizing
  * @param file - the image file from input
  * @param folder - the folder inside the bucket ("profiles" | "rooms"); default folder to "profiles"
  * @param replaceFileName - optional for overwriting existing files by name
@@ -36,7 +44,7 @@ export async function clientUploadImageToSupabase(
 
     const fileName = replaceFileName
      ? `${folder}/${replaceFileName}`
-     : `${folder}/${randomUUID()}-${compressedFile.name.replaceAll(" ", "_")}`;
+     : `${folder}/${crypto.randomUUID()}-${compressedFile.name.replaceAll(" ", "_")}`;
 
     const { error } = await client.storage
       .from(BUCKET_NAME)

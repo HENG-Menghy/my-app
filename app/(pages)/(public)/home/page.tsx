@@ -1,5 +1,9 @@
-// home/page.tsx
+// app/home/page.tsx
 
 export default function HomePage() {
-  return <div className="px-8">Display current meeting</div>;
+  return (
+    <main>
+      <div className="sticky top-4">Display current meeting</div>
+    </main>
+  );
 }

@@ -1,23 +1,22 @@
 // @/types/auth.ts
 
-import type { User, UserRole, UserGender } from "@prisma/client";
+import type {
+  User,
+  UserRole,
+  UserGender,
+  AuthEventType,
+  AuthEventStatus,
+} from "@prisma/client";
 
-// Auth Response Types
-export interface AuthResponse {
-  user: {
-    id: string;
-    fullname: string;
-    email: string;
-    role: UserRole;
-  };
-  session?: {
-    id: string;
-    expiresAt: string;
-  };
-  tokens: AuthTokens;
+// Auth User Payload Type
+export interface AuthUserPayload {
+  userId: string;
+  sessionId: string;
+  email: string;
+  role: UserRole;
 }
 
-// Token and Session Types
+// Token Types
 export interface AuthTokens {
   accessToken: string;
   refreshToken: string;
@@ -35,26 +34,34 @@ export interface RefreshTokenPayload {
   sid: string;
 }
 
-// Metadata of session
+// Session and Audit Types
 export interface SessionMetadata {
-  ipAddress?: string;
-  userAgent?: string;
-  deviceInfo?: {
-    type?: string;
-    vendor?: string;
-    model?: string;
-    os?: string;
-    browser?: string;
+  ipAddress: string;
+  os: string;
+  browser: string;
+  device: {
+    model: string;
+    type: string;
   };
-  location?: {
+  location: {
     country: string;
     city: string;
   };
-  actor?: string;
-  action?: string;
 }
 
-// Login Types
+export interface SessionWithAuthEvent {
+  userId: string | null;
+  type: AuthEventType;
+  status: AuthEventStatus;
+  actor: string;
+  reason: string | null;
+  revoked: boolean;
+  revokedAt: Date | null;
+  expiresAt: Date | null;
+  metadata: SessionMetadata;
+}
+
+// Login Type
 export interface LoginCredentials {
   email: string;
   password: string;
@@ -79,8 +86,8 @@ export interface RegisterCompleteData {
   imageUrl?: string;
 }
 
-// Password Reset Types
-export interface PasswordResetInitData {
+// Password Types
+export interface PasswordResetInitialData {
   email: string;
 }
 
@@ -93,26 +100,34 @@ export interface PasswordResetCompleteData {
   email: string;
   otp: string;
   password: string;
+  confirmPassword: string;
 }
 
 export interface ChangePasswordData {
   currentPassword: string;
   newPassword: string;
+  confirmPassword: string;
 }
 
-// User Related Types
-export interface UserProfile
-  extends Pick<
-    User,
-    | "id"
-    | "email"
-    | "fullname"
-    | "phonenumber"
-    | "gender"
-    | "imageUrl"
-    | "role"
-    | "status"
-  > {
-  emailVerified: boolean;
-  lastLoginAt: Date | null;
+// Profile Types
+export interface ProfileUpdateData {
+  fullname?: string;
+  phonenumber?: string;
+  gender?: UserGender;
+  imageUrl?: string;
 }
+
+export interface ProfileData extends Pick<
+  User, 
+  "id" | 
+  "email" |
+  "phonenumber" |
+  "fullname" |
+  "imageUrl" |
+  "gender" |
+  "role" |
+  "status" |
+  "emailVerified" |
+  "lastLoginAt" |
+  "passwordChangedAt"
+> {}

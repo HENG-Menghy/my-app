@@ -12,8 +12,7 @@ const ThemeToggle = () => {
     setTheme(resolvedTheme === "dark" ? "light" : "dark");
   };
   const theme = resolvedTheme === "dark" ? "dark" : "light";
-  const title =
-    theme === "dark" ? "Switch to Light Mode" : "Switch to Dark Mode";
+
   if (!mounted) return null;
 
   return (
@@ -22,18 +21,17 @@ const ThemeToggle = () => {
         <button
           type="button"
           onClick={toggleTheme}
-          title={title}
-          className="inline-block rounded-full p-[10px] cursor-pointer transition-colors duration-75 border border-colorBorder hover:bg-gray-400 dark:hover:bg-gray-500 hover:border-transparent hover:text-white text-black dark:text-white"
+          className="inline-block cursor-pointer text-textSecondary hover:text-black dark:hover:text-white"
         >
           {theme === "dark" ? (
-            <SunIcon className="size-5 transition-transform duration-75" />
+            <MoonIcon className="size-5 transition-transform duration-75 ease-in-out" />
           ) : (
-            <MoonIcon className="size-[18px] transition-transform duration-75" />
+            <SunIcon className="size-5 transition-transform duration-75 ease-in-out" />
           )}
         </button>
       )}
     </>
   );
-}
+};
 
 export default ThemeToggle;

@@ -9,6 +9,7 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
 enum UserRole {
   user
   admin
@@ -20,9 +21,8 @@ enum UserGender {
 }
 
 enum UserStatus {
-  pending
+  inactive
   active
-  suspended
 }
 
 enum RoomStatus {
@@ -77,12 +77,15 @@ enum MeetingHistoryAction {
 }
 
 enum AuthEventType {
+  OTP_VERIFY
+  OTP_RESET
   REGISTER
   LOGIN
   LOGOUT
   PASSWORD_CHANGE
   PASSWORD_RESET
-  ACCOUNT_LOCKED
+  UPDATE_PROFILE
+  DELETE_ACCOUNT
   TOKEN_REFRESH
   TOKEN_REUSED
   SESSION_EXPIRED
@@ -94,7 +97,7 @@ enum AuthEventStatus {
 }
 
 model User {
-  id String @id @default(uuid())
+  id String @id @default(uuid()) @db.Uuid
   email String @unique @db.VarChar(255)
   password String @db.VarChar(255)
   phonenumber String @unique @db.VarChar(255)
@@ -102,8 +105,8 @@ model User {
   role UserRole @default(user)
   gender UserGender
   imageUrl String?
-  status UserStatus @default(pending)
-  emailVerified DateTime?
+  status UserStatus @default(inactive)
+  emailVerified Boolean @default(false)
   lastLoginAt DateTime?
   passwordChangedAt DateTime?
   createdAt DateTime @default(now())
@@ -127,41 +130,44 @@ model User {
 }
 
 model AuthEvent {
-  id String @id @default(uuid())
-  userId String 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id String @id @default(uuid()) @db.Uuid
+  userId String? @db.Uuid
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
   type AuthEventType
   status AuthEventStatus @default(success) 
+  actor String @db.VarChar(255)
+  reason String? @db.VarChar(255)
   sessions Session[]
   createdAt DateTime @default(now())
 }
 
 model Session {
-  id String @id @default(uuid())
-  userId String
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  eventId String
+  id String @id @default(uuid()) @db.Uuid
+  userId String? @db.Uuid
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId String @db.Uuid
   authEvent AuthEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  invalidated Boolean @default(false)
   metadata Json
+  revoked Boolean @default(false)
+  revokedAt DateTime?
   expiresAt DateTime?
   lastActiveAt DateTime @default(now())
   createdAt DateTime @default(now())
 }
 
 model Booking {
-  id String @id @default(uuid())
-  roomId String
+  id String @id @default(uuid()) @db.Uuid
+  roomId String @db.Uuid
   room Room @relation(fields: [roomId], references: [id])
-  userId String
+  userId String @db.Uuid
   user User @relation(name: "UserBookings", fields: [userId], references: [id])
-  bookedBy String
+  bookedBy String @db.Uuid
   bookedByUser User @relation(name: "BookedByUser", fields: [bookedBy], references: [id])
-  approvedBy String?
+  approvedBy String? @db.Uuid
   approvedByUser User? @relation(name: "ApprovedByUser", fields: [approvedBy], references: [id])
-  assignedTo String?
+  assignedTo String? @db.Uuid
   assignedToUser User? @relation(name: "AssignedToUser", fields: [assignedTo], references: [id])
-  recurrenceId String?
+  recurrenceId String? @db.Uuid
   recurrence RecurrenceBooking? @relation(fields: [recurrenceId], references: [id])
   code String @unique @db.VarChar(255)
   meetingTitle String 
@@ -181,10 +187,10 @@ model Booking {
 }
 
 model RecurrenceBooking {
-  id String @id @default(uuid())
-  roomId String
+  id String @id @default(uuid()) @db.Uuid
+  roomId String @db.Uuid
   room Room @relation(fields: [roomId], references: [id])
-  createdBy String
+  createdBy String @db.Uuid
   user User @relation(fields: [createdBy], references: [id])
   meetingTitle String
   meetingLeader String @db.VarChar(255)
@@ -204,12 +210,12 @@ model RecurrenceBooking {
 }
 
 model Meeting {
-  id String @id @default(uuid())
-  bookingId String @unique
+  id String @id @default(uuid()) @db.Uuid
+  bookingId String @unique @db.Uuid
   booking Booking @relation(name: "BookingId", fields: [bookingId], references: [id])
-  assignedTo String?
+  assignedTo String? @db.Uuid
   assignedMeetingTo User? @relation(name: "AssignedMeetings", fields: [assignedTo], references: [id])
-  modifiedBy String?
+  modifiedBy String? @db.Uuid
   modifiedMeetingBy User? @relation(name: "ModifiedMeetings", fields: [modifiedBy], references: [id])
   bookingReference String @unique @db.VarChar(255)
   reference Booking @relation(name: "referenceCode", fields: [bookingReference], references: [code])
@@ -224,10 +230,10 @@ model Meeting {
 }
 
 model MeetingHistory {
-  id String @id @default(uuid())
-  meetingId String
+  id String @id @default(uuid()) @db.Uuid
+  meetingId String @db.Uuid
   meeting Meeting @relation(fields: [meetingId], references: [id])
-  modifiedBy String?
+  modifiedBy String? @db.Uuid
   user User? @relation(fields: [modifiedBy], references: [id])
   description String?
   action MeetingHistoryAction
@@ -235,7 +241,7 @@ model MeetingHistory {
 }
 
 model Building {
-  id String @id @default(uuid())
+  id String @id @default(uuid()) @db.Uuid
   name String @unique @db.VarChar(255)
   address String
   location String?
@@ -249,8 +255,8 @@ model Building {
 }
 
 model Floor {
-  id String @id @default(uuid())
-  buildingId String 
+  id String @id @default(uuid()) @db.Uuid
+  buildingId String @db.Uuid
   building Building @relation(fields: [buildingId], references: [id], onDelete: Cascade)
   floorNumber Int 
   totalRooms Int @default(0)
@@ -266,8 +272,8 @@ model Floor {
 }
 
 model Room {
-  id String @id @default(uuid())
-  floorId String
+  id String @id @default(uuid()) @db.Uuid
+  floorId String @db.Uuid
   floor Floor @relation(fields: [floorId], references: [id], onDelete: Cascade)
   imageUrl String?
   name String @unique @db.VarChar(255)
@@ -287,7 +293,7 @@ model Room {
 }
 
 model RoomAvailabilityGroup {
-  id String @id @default(uuid())  
+  id String @id @default(uuid()) @db.Uuid
   date DateTime
   isClosed Boolean
   reason String?
@@ -296,10 +302,10 @@ model RoomAvailabilityGroup {
 }
 
 model RoomAvailabilityOverride {
-  id String @id @default(uuid())
-  roomId String
+  id String @id @default(uuid()) @db.Uuid
+  roomId String @db.Uuid
   room Room @relation(fields: [roomId], references: [id])
-  groupId String
+  groupId String @db.Uuid
   group RoomAvailabilityGroup @relation(fields: [groupId], references: [id])
 
   @@unique([roomId, groupId])
@@ -312,13 +318,13 @@ model Holiday {
 }
 
 model Notification {
-  id String @id @default(uuid())
-  userId String
-  user User @relation(fields: [userId], references: [id])
-  bookingId String?
-  booking Booking? @relation(fields: [bookingId], references: [id]) 
-  meetingId String?
-  meeting Meeting? @relation(fields: [meetingId], references: [id])
+  id String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookingId String? @db.Uuid
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Cascade) 
+  meetingId String? @db.Uuid
+  meeting Meeting? @relation(fields: [meetingId], references: [id], onDelete: Cascade)
   message String
   type String @db.VarChar(255)
   isRead Boolean @default(false)
@@ -326,12 +332,12 @@ model Notification {
 }
 
 model Report {
-  id String @id @default(uuid())
-  generatedBy String
+  id String @id @default(uuid()) @db.Uuid
+  generatedBy String @db.Uuid
   user User @relation(fields: [generatedBy], references: [id])
-  bookingId String?
+  bookingId String? @db.Uuid
   booking Booking? @relation(fields: [bookingId], references: [id]) 
-  meetingId String?
+  meetingId String? @db.Uuid
   meeting Meeting? @relation(fields: [meetingId], references: [id])
   data Json
   type String @db.VarChar(255)

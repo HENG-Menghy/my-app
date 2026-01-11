@@ -2,12 +2,12 @@
 
 import { z } from "zod";
 
-export const SupabaseImageUrl = z.string().superRefine((value, ctx) => {
+export const SupabaseImageURLSchema = z.string().superRefine((value, ctx) => {
   try {
     const url = new URL(value);
     const isValid =
       url.protocol === "https:" &&
-      url.hostname === "zlowucgjecrlilkyoamr.supabase.co" &&
+      url.hostname === "lpymuofbexgjrijarltz.supabase.co" &&
       url.pathname.startsWith("/storage/v1/object/public/");
 
     if (!isValid) {
@@ -25,7 +25,7 @@ export const SupabaseImageUrl = z.string().superRefine((value, ctx) => {
   }
 });
 
-export const GoogleMapsUrl = z.string().superRefine((value, ctx) => {
+export const GoogleMapURLSchema = z.string().superRefine((value, ctx) => {
   try {
     const url = new URL(value);
     const isValid =

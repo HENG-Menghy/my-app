@@ -3,9 +3,8 @@
 import bcrypt from "bcryptjs";
 import prisma from "@/lib/db/prisma";
 import { AuthError } from "@/lib/auth/errors";
-import { AUTH_CONSTANTS } from "@/lib/auth/constants";
-import { RedisClient } from "@/lib/auth/redis";
-import { emailService } from "./emailService";
+import { AUTH_CONSTANTS, REDIS_PREFIXES } from "@/lib/constants";
+import { UpstashRedis } from "@/lib/upstash-redis";
 import { otpService } from "./otpService";
 import { tokenService } from "./tokenService";
 import type {
@@ -13,13 +12,14 @@ import type {
   RegisterInitialData,
   RegisterVerifyData,
   RegisterCompleteData,
-  PasswordResetInitData,
+  PasswordResetInitialData,
   PasswordResetVerifyData,
   PasswordResetCompleteData,
   ChangePasswordData,
   SessionMetadata,
-  AuthResponse,
-  UserProfile,
+  AuthTokens,
+  ProfileUpdateData,
+  ProfileData,
 } from "@/types/auth";
 import {
   AuthEventStatus,
@@ -27,149 +27,144 @@ import {
   UserGender,
   UserStatus,
 } from "@prisma/client";
-import { fromUTCToLocal } from "@/utils/datetime";
 import { Logger } from "@/lib/logger";
+import { RateLimitActions, RateLimitInfo } from "@/types/redis";
+import { qstashClient } from "@/lib/upstash-qstash";
+import { sessionService } from "./sessionService";
+import { normalizeTruthySession } from "@/utils/normalizeTruthySession";
+import {
+  AccountRemovalEmailData,
+  EmailTypes,
+  LoginAlertEmailData,
+  PasswordResetEmailData,
+  VerificationEmailData,
+  WelcomeEmailData,
+} from "@/types/email";
 
 class AuthService {
   private async validateSecurity(
-    identifier: string,
-    action: keyof typeof AUTH_CONSTANTS.RATE_LIMITS,
-    securityContext?: SessionMetadata
-  ) {
-    const rateLimitInfo = await RedisClient.checkRateLimit(
-      action,
+    email: string,
+    action: RateLimitActions,
+    metadata: SessionMetadata
+  ): Promise<void> {
+    const incomingSession = normalizeTruthySession(metadata, email);
+
+    // Find user and active sessions by email
+    const [user, sessions] = await Promise.all([
+      prisma.user.findUnique({
+        where: { email },
+        select: { id: true },
+      }),
+      prisma.session.findMany({
+        where: {
+          user: { email },
+          revoked: false,
+          expiresAt: { gt: new Date() },
+        },
+        select: { metadata: true },
+      }),
+    ]);
+
+    // Extract truth sessions
+    const truthySessions = sessions.map((session) =>
+      normalizeTruthySession(
+        session.metadata as unknown as SessionMetadata,
+        email
+      )
+    );
+
+    const isTruth =
+      !!incomingSession && truthySessions.includes(incomingSession);
+
+    // Checking rate limit for per user attempts to sensitive endpoints
+    const userId = isTruth ? user!.id : null;
+    const identifier = isTruth ? email : metadata.ipAddress;
+    const rateLimitInfo: RateLimitInfo = await UpstashRedis.checkRateLimit(
       identifier,
+      action,
       AUTH_CONSTANTS.RATE_LIMITS[action]
     );
 
     if (!rateLimitInfo.allowed) {
-      // If account is blocked due to too many attempts, send notification
-      if (rateLimitInfo.blocked && action === "LOGIN") {
-        const user = await prisma.user.findUnique({
-          where: { email: identifier },
-        });
-        if (user) {
-          Logger.debug("ACCOUNT_LOCKED", {
-            ...securityContext,
-            actor: user.email,
-            action: "Account locked due to multiple failed login attempts",
-          });
+      const wasNotifiedKey = `notified:${REDIS_PREFIXES.RATE_LIMIT}${action}:${identifier}`;
 
-          // Create an auth event to log the account lock action
-          const authEvent = await prisma.authEvent.create({
-            data: {
-              userId: user.id,
-              type: AuthEventType.ACCOUNT_LOCKED,
-              status: AuthEventStatus.failure,
-            },
-          });
-
-          await Promise.all([
-            emailService.sendAccountLockedEmail(user.email, user.fullname),
-            prisma.user.update({
-              where: { email: identifier },
-              data: { status: UserStatus.suspended },
-            }),
-
-            // Create a session record to capture metadata for audit/logging
-            prisma.session.create({
-              data: {
-                userId: user.id,
-                eventId: authEvent.id,
-                metadata: {
-                  ...securityContext,
-                  actor: user.email,
-                  action:
-                    "Account locked due to multiple failed login attempts",
-                },
-              },
-            }),
-          ]);
-        }
+      // Check if already notified
+      const alreadyNotified = await UpstashRedis.get(wasNotifiedKey);
+      if (!alreadyNotified) {
+        // Create an auth event and a session record
+        await Promise.all([
+          sessionService.auditLog(
+            userId,
+            action,
+            AuthEventStatus.failure,
+            identifier,
+            "Exceeded daily attempt limit"
+          ),
+          UpstashRedis.set(
+            wasNotifiedKey,
+            `Rate limit exceeded for ‘${action}’ action`,
+            rateLimitInfo.resetIn
+          ),
+        ]);
       }
+
       throw AuthError.tooManyAttempts(rateLimitInfo.resetIn);
     }
   }
 
   async login(
     credentials: LoginCredentials,
-    securityContext?: SessionMetadata
-  ): Promise<AuthResponse> {
+    metadata: SessionMetadata
+  ): Promise<AuthTokens> {
     // Validate rate limiting
-    await this.validateSecurity(credentials.email, "LOGIN", securityContext);
+    await this.validateSecurity(credentials.email, "LOGIN", metadata);
 
     // Find user
     const user = await prisma.user.findUnique({
       where: { email: credentials.email },
     });
 
-    // Record an audit log for a failed login attempt
-    if (user && !(await bcrypt.compare(credentials.password, user.password))) {
-      Logger.debug("LOGIN_FAILED", {
-        ...securityContext,
-        actor: user.email,
-        action: "Login failed due to an incorrect password",
-      });
-
-      // Create an auth event to log the failed login attempt
-      const authEvent = await prisma.authEvent.create({
-        data: {
-          userId: user.id,
-          type: AuthEventType.LOGIN,
-          status: AuthEventStatus.failure,
-        },
-      });
-
-      // Create a session record to capture metadata for audit/logging
-      await prisma.session.create({
-        data: {
-          userId: user.id,
-          eventId: authEvent.id,
-          metadata: {
-            ...securityContext,
-            actor: user.email,
-            action: "Login failed due to an incorrect password",
-          },
-        },
-      });
-    }
-
     // Validate credentials
-    if (!user || !(await bcrypt.compare(credentials.password, user.password))) {
-      Logger.debug("LOGIN_FAILED", {
-        ...securityContext,
-        actor: credentials.email,
-        action: "Login failed due to invalid credentials",
-      });
-
+    if (!user) {
+      // Create an auth event and a session record
+      await sessionService.auditLog(
+        null,
+        AuthEventType.LOGIN,
+        AuthEventStatus.failure,
+        "ANONYMOUS",
+        "Invalid credentials"
+      );
+      throw AuthError.invalidCredentials();
+    } else if (
+      user &&
+      !(await bcrypt.compare(credentials.password, user.password))
+    ) {
+      // Create an auth event and a session record
+      await sessionService.auditLog(
+        user.id,
+        AuthEventType.LOGIN,
+        AuthEventStatus.failure,
+        credentials.email,
+        "Incorrect password"
+      );
       throw AuthError.invalidCredentials();
     }
 
-    // Check user status
-    if (user.status === UserStatus.suspended) {
-      throw AuthError.accountLocked();
-    }
-
-    // Check if email verified
-    if (!user.emailVerified) {
-      throw AuthError.emailNotVerified();
-    }
-
     // Create an auth event and associated session upon successful login
-    const authEvent = await prisma.authEvent.create({
-      data: {
-        userId: user.id,
-        type: AuthEventType.LOGIN,
-      },
+    const { session } = await sessionService.createSessionWithAuthEvent({
+      userId: user.id,
+      type: AuthEventType.LOGIN,
+      status: AuthEventStatus.success,
+      actor: credentials.email,
+      reason: null,
+      revoked: false,
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + AUTH_CONSTANTS.SESSION_EXPIRY * 1000),
+      metadata,
     });
-    const session = await prisma.session.create({
-      data: {
-        userId: user.id,
-        eventId: authEvent.id,
-        expiresAt: new Date(Date.now() + AUTH_CONSTANTS.SESSION_EXPIRY * 1000),
-        metadata: { ...securityContext },
-      },
-    });
+
+    // Cache active (valid) session in Redis
+    await sessionService.cacheSession(session);
 
     // Generate tokens
     const tokens = await tokenService.generateAuthTokens({
@@ -179,8 +174,8 @@ class AuthService {
       role: user.role,
     });
 
-    // Update last login with active status and send login alert
-    await Promise.all([
+    // Update user's last login/status and trigger login alert email in background
+    await Promise.allSettled([
       prisma.user.update({
         where: { id: user.id },
         data: {
@@ -188,36 +183,40 @@ class AuthService {
           status: UserStatus.active,
         },
       }),
-      emailService.sendLoginAlertEmail(user.email, user.fullname, {
-        time: new Date().toISOString(),
-        ipAddress: securityContext?.ipAddress,
-        userAgent: securityContext?.userAgent,
-        location: securityContext?.location,
-        os: securityContext?.deviceInfo?.os,
-        browser: securityContext?.deviceInfo?.browser,
+      qstashClient.publishJSON({
+        url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-email`,
+        body: {
+          type: EmailTypes.loginAlertEmail,
+          email: user.email,
+          fullname: user.fullname,
+          loginInfo: {
+            time: new Date().toISOString(),
+            device: metadata?.device.model,
+            os: metadata?.os,
+            browser: metadata?.browser,
+            location: metadata?.location,
+          },
+        } as LoginAlertEmailData,
       }),
     ]);
 
-    return {
-      user: {
-        id: user.id,
-        fullname: user.fullname,
-        email: user.email,
-        role: user.role,
-      },
-      session: {
-        id: session.id,
-        expiresAt: fromUTCToLocal(session.expiresAt!).toFormat(
-          "yyyy LLL dd hh:mm:ss a"
-        ),
-      },
-      tokens,
-    };
+    return tokens;
   }
 
-  async initiateRegistration(data: RegisterInitialData): Promise<void> {
+  async initiateRegistration(
+    data: RegisterInitialData,
+    metadata: SessionMetadata
+  ): Promise<void> {
+    // Check if email is blocked from registration
+    const blockKey = `${REDIS_PREFIXES.BLOCK}registration:${data.email}`;
+    const isEmailBlocked = await UpstashRedis.get(blockKey);
+    const blockTTL = await UpstashRedis.ttl(blockKey);
+    if (isEmailBlocked) {
+      throw AuthError.emailBlocked(blockTTL);
+    }
+
     // Validate rate limiting
-    await this.validateSecurity(data.email, "OTP_REQUEST");
+    await this.validateSecurity(data.email, "OTP_VERIFY", metadata);
 
     // Check if email exists
     const existingUser = await prisma.user.findUnique({
@@ -228,9 +227,19 @@ class AuthService {
       throw AuthError.emailTaken();
     }
 
-    // Generate and send OTP
+    // Generate OTP and trigger background verification email
     const otp = await otpService.generateOTP(data.email, "VERIFY_EMAIL");
-    await emailService.sendVerificationEmail(data.email, otp);
+    await Promise.allSettled([
+      qstashClient.publishJSON({
+        url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-email`,
+        body: {
+          type: EmailTypes.verificationEmail,
+          email: data.email,
+          otp,
+          expiry: AUTH_CONSTANTS.OTP_EXPIRY,
+        } as VerificationEmailData,
+      }),
+    ]);
   }
 
   async verifyRegistrationOTP(data: RegisterVerifyData): Promise<void> {
@@ -248,41 +257,55 @@ class AuthService {
 
   async completeRegistration(
     data: RegisterCompleteData,
-    securityContext?: SessionMetadata
+    metadata: SessionMetadata
   ): Promise<void> {
-    // Check if email or phone exists
+    // Check if email exists
     const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ email: data.email }, { phonenumber: data.phonenumber }],
-      },
+      where: { email: data.email },
     });
 
     if (existingUser) {
-      throw new AuthError(
-        "ACCOUNT_EXISTS",
-        existingUser.email === data.email
-          ? "Email address is already registered"
-          : "Phone number is already registered"
-      );
+      throw AuthError.emailTaken();
     }
 
-    // Verify if registration was initiated and OTP was verified
+    // Verify if registration was initiated and OTP is still valid
     const otpData = await otpService.getOTPData(data.email, "VERIFY_EMAIL");
     if (!otpData || !otpData.verified) {
+      // Create an auth event and a session record
+      await sessionService.auditLog(
+        null,
+        AuthEventType.REGISTER,
+        AuthEventStatus.failure,
+        "ANONYMOUS",
+        "Email verification has expired or is not completed"
+      );
       Logger.error(
         "REGISTRATION_FAILED",
         new Error(
-          "Registration incomplete. Please verify your email address using the OTP before continuing."
+          "Email verification OTP has expired or the email was never verified within the allowed 10-minute window."
         )
       );
 
-      throw AuthError.emailNotVerified();
+      throw new AuthError(
+        "REGISTRATION_FAILED",
+        "Email verification has expired or is not completed.",
+        403
+      );
     }
 
     // Hash password
     const hashedPassword = await bcrypt.hash(data.password, 12);
 
-    // Create user
+    // Get default image url if not provided
+    let defaultImageUrl = "";
+    if (!data.imageUrl) {
+      defaultImageUrl =
+        data.gender === UserGender.male
+          ? "https://lpymuofbexgjrijarltz.supabase.co/storage/v1/object/public/images-bucket/profiles/male_profile.jpg"
+          : "https://lpymuofbexgjrijarltz.supabase.co/storage/v1/object/public/images-bucket/profiles/female_profile.jpg";
+    }
+
+    // Create user, auth event, and registration session atomically
     const user = await prisma.user.create({
       data: {
         email: data.email,
@@ -290,40 +313,97 @@ class AuthService {
         fullname: data.fullname,
         phonenumber: data.phonenumber,
         gender: data.gender,
-        imageUrl:
-          data.imageUrl ?? `${data.gender === UserGender.male ? "" : ""}`,
-        emailVerified: new Date(),
+        imageUrl: data.imageUrl ?? defaultImageUrl,
+        emailVerified: true,
       },
     });
 
-    // Create an auth event and associated session upon successful register
-    const authEvent = await prisma.authEvent.create({
-      data: {
-        userId: user.id,
-        type: AuthEventType.REGISTER,
-      },
-    });
-    await prisma.session.create({
-      data: {
-        userId: user.id,
-        eventId: authEvent.id,
-        metadata: { ...securityContext },
-      },
-    });
+    // Create an auth event
+    await sessionService.auditLog(
+      user.id,
+      AuthEventType.REGISTER,
+      AuthEventStatus.success,
+      data.email,
+      null
+    );
 
-    // Clear OTP data and send welcome email
-    await Promise.all([
+    // Clear OTP data and trigger welcome email in the background
+    await Promise.allSettled([
       otpService.clearOTPData(data.email, "VERIFY_EMAIL"),
-      emailService.sendWelcomeEmail({
-        email: user.email,
-        fullname: user.fullname,
+      UpstashRedis.del(
+        `${REDIS_PREFIXES.RATE_LIMIT}OTP_VERIFY:${metadata.ipAddress}`
+      ),
+      qstashClient.publishJSON({
+        url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-email`,
+        body: {
+          type: EmailTypes.welcomeEmail,
+          email: user.email,
+          fullname: user.fullname,
+        } as WelcomeEmailData,
       }),
     ]);
   }
 
-  async initiatePasswordReset(data: PasswordResetInitData): Promise<void> {
+  async changePassword(
+    userId: string,
+    currentSessionId: string,
+    changePasswordData: ChangePasswordData,
+    metadata: SessionMetadata
+  ): Promise<void> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, password: true },
+    });
+    if (!user) throw AuthError.accountNotFound();
+
+    // Check if password is valid
+    const isPasswordValid = await bcrypt.compare(
+      changePasswordData.currentPassword,
+      user.password
+    );
+    if (isPasswordValid) {
+      // Update and hash new password
+      const hashedPassword = await bcrypt.hash(
+        changePasswordData.newPassword,
+        12
+      );
+      await prisma.user.update({
+        where: { id: userId },
+        data: { password: hashedPassword },
+      });
+
+      // After successfully changed password
+      await Promise.all([
+        // Validate rate limiting
+        this.validateSecurity(user.email, "PASSWORD_CHANGE", metadata),
+
+        // Audit log
+        sessionService.auditLog(
+          userId,
+          AuthEventType.PASSWORD_CHANGE,
+          AuthEventStatus.success,
+          user.email,
+          null
+        ),
+
+        // Log out user sessions except the current one
+        this.logoutAll(userId, currentSessionId),
+      ]);
+    } else {
+      throw new AuthError(
+        "PASSWORD_CHANGE_FAILED",
+        "Current password is incorrect",
+        400
+      );
+    }
+  }
+
+  async initiatePasswordReset(
+    data: PasswordResetInitialData,
+    metadata: SessionMetadata
+  ): Promise<void> {
     // Validate rate limiting
-    await this.validateSecurity(data.email, "OTP_REQUEST");
+    await this.validateSecurity(data.email, "OTP_RESET", metadata);
 
     const user = await prisma.user.findUnique({
       where: { email: data.email },
@@ -334,102 +414,238 @@ class AuthService {
       return;
     }
 
-    // Generate and send OTP
+    // Generate OTP and trigger password reset email in the background
     const otp = await otpService.generateOTP(data.email, "RESET_PASSWORD");
-    await emailService.sendPasswordResetEmail({
-      email: user.email,
-      fullname: user.fullname,
-      resetCode: otp,
-      expiresInMinutes: AUTH_CONSTANTS.OTP_EXPIRY / 60,
-    });
+    await Promise.allSettled([
+      qstashClient.publishJSON({
+        url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-email`,
+        body: {
+          type: EmailTypes.passwordResetEmail,
+          email: user.email,
+          fullname: user.fullname,
+          otp,
+          expiry: AUTH_CONSTANTS.OTP_EXPIRY,
+        } as PasswordResetEmailData,
+      }),
+    ]);
   }
 
   async verifyPasswordResetOTP(data: PasswordResetVerifyData): Promise<void> {
     await otpService.verifyOTP(data.email, data.otp, "RESET_PASSWORD");
   }
 
-  async completePasswordReset(data: PasswordResetCompleteData): Promise<void> {
-    // Verify OTP one last time
-    await otpService.verifyOTP(data.email, data.otp, "RESET_PASSWORD");
-
+  async completePasswordReset(
+    data: PasswordResetCompleteData,
+    metadata: SessionMetadata
+  ): Promise<void> {
     const user = await prisma.user.findUnique({
       where: { email: data.email },
+      select: { id: true, email: true },
     });
+    if (!user) throw AuthError.accountNotFound();
 
-    if (!user) {
-      throw AuthError.accountNotFound();
+    // Verify if OTP is still valid for password reset
+    const otpData = await otpService.getOTPData(data.email, "RESET_PASSWORD");
+    if (!otpData || !otpData.verified) {
+      // Create an auth event
+      await sessionService.auditLog(
+        user.id,
+        AuthEventType.PASSWORD_RESET,
+        AuthEventStatus.failure,
+        user.email,
+        "OTP expired or not verified within the allowed 10-minute window"
+      );
+      Logger.error(
+        "PASSWORD_RESET_FAILED",
+        new Error(
+          "Password reset failed: OTP expired or not verified within 10 minutes"
+        )
+      );
+
+      throw new AuthError(
+        "PASSWORD_RESET_FAILED",
+        "The password reset code has expired or was not verified within 10 minutes. Please request a new one.",
+        403
+      );
     }
 
     // Hash new password
     const hashedPassword = await bcrypt.hash(data.password, 12);
     await prisma.user.update({
       where: { id: user.id },
-      data: {
-        password: hashedPassword,
+      data: { password: hashedPassword },
+    });
+
+    await Promise.all([
+      // Validate rate limiting
+      this.validateSecurity(user.email, "PASSWORD_RESET", metadata),
+
+      // Create an auth event
+      sessionService.auditLog(
+        user.id,
+        AuthEventType.PASSWORD_RESET,
+        AuthEventStatus.success,
+        data.email,
+        null
+      ),
+
+      // Logout all and clear OTP data
+      this.logoutAll(user.id),
+      otpService.clearOTPData(user.email, "RESET_PASSWORD"),
+    ]);
+  }
+
+  async viewProfile(userId: string): Promise<ProfileData> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        phonenumber: true,
+        fullname: true,
+        gender: true,
+        role: true,
+        status: true,
+        imageUrl: true,
+        emailVerified: true,
+        lastLoginAt: true,
+        passwordChangedAt: true,
       },
     });
 
-    // Invalidate all sessions and clear OTP
+    if (!user) throw AuthError.accountNotFound();
+
+    return user;
   }
 
-  async changePassword(
+  async updateProfile(
     userId: string,
-    data: ChangePasswordData
-  ): Promise<void> {
+    profileUpdateData: ProfileUpdateData,
+    metadata: SessionMetadata
+  ): Promise<ProfileData> {
     const user = await prisma.user.findUnique({
       where: { id: userId },
+      select: { id: true, email: true },
     });
+    if (!user) throw AuthError.accountNotFound();
 
-    if (!user) {
-      throw AuthError.accountNotFound();
-    }
-
-    // Verify current password
-    const isValid = await bcrypt.compare(data.currentPassword, user.password);
-    if (!isValid) {
-      throw new AuthError(
-        "INVALID_CURRENT_PASSWORD",
-        "Current password is invalid"
-      );
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(data.newPassword, 12);
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        password: hashedPassword,
+    // Update profile info
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: profileUpdateData,
+      select: {
+        id: true,
+        email: true,
+        phonenumber: true,
+        fullname: true,
+        gender: true,
+        role: true,
+        status: true,
+        imageUrl: true,
+        emailVerified: true,
+        lastLoginAt: true,
+        passwordChangedAt: true,
       },
     });
 
-    // Invalidate all other sessions
+    // After profile updated successfully
+    await Promise.all([
+      // Validate rate limiting
+      this.validateSecurity(user.email, "UPDATE_PROFILE", metadata),
+
+      // Create an auth event
+      sessionService.auditLog(
+        user.id,
+        AuthEventType.UPDATE_PROFILE,
+        AuthEventStatus.success,
+        user.email,
+        null
+      ),
+    ]);
+
+    return updatedUser;
   }
 
-  async logout(userId: string, sessionId: string): Promise<void> {}
-
-  async logoutAll(userId: string, currentSessionId?: string): Promise<void> {}
-
-  async getUserProfile(userId: string): Promise<UserProfile> {
+  async deleteAccount(userId: string): Promise<void> {
     const user = await prisma.user.findUnique({
       where: { id: userId },
+      select: { id: true, email: true, fullname: true },
+    });
+    if (!user) throw AuthError.accountNotFound();
+
+    // Delete user
+    await prisma.user.delete({ where: { id: userId } });
+
+    // After account is deleted, block new account registration for 3 days
+    const { id, email, fullname } = user;
+    const key = `${REDIS_PREFIXES.BLOCK}registration:${email}`;
+    await Promise.allSettled([
+      // Create an auth event
+      sessionService.auditLog(
+        id,
+        AuthEventType.DELETE_ACCOUNT,
+        AuthEventStatus.success,
+        email,
+        null
+      ),
+
+      // Block email for 3 days
+      UpstashRedis.set(
+        key,
+        "Blocked email for account registration",
+        AUTH_CONSTANTS.ACCOUNT_BLOCKED_EXPIRY
+      ),
+
+      // Send email
+      qstashClient.publishJSON({
+        url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/send-email`,
+        body: {
+          type: EmailTypes.registrationBlockedEmail,
+          email,
+          fullname,
+          expiry: AUTH_CONSTANTS.ACCOUNT_BLOCKED_EXPIRY,
+        } as AccountRemovalEmailData,
+      }),
+    ]);
+  }
+
+  async logout(userId: string, sessionId: string): Promise<void> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    if (!user) throw AuthError.accountNotFound();
+
+    await Promise.all([
+      sessionService.revokeSession(sessionId),
+      sessionService.auditLog(
+        userId,
+        AuthEventType.LOGOUT,
+        AuthEventStatus.success,
+        user.email,
+        null
+      ),
+    ]);
+  }
+
+  async logoutAll(userId: string, currentSessionId?: string): Promise<void> {
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw AuthError.accountNotFound();
+
+    // Find sessions to revoke
+    const where = currentSessionId
+      ? {
+          userId,
+          NOT: { id: currentSessionId },
+        }
+      : { userId };
+    const revokeSessions = await prisma.session.findMany({
+      where,
+      select: { id: true },
     });
 
-    if (!user) {
-      throw AuthError.accountNotFound();
-    }
-
-    return {
-      id: user.id,
-      email: user.email,
-      fullname: user.fullname,
-      phonenumber: user.phonenumber,
-      gender: user.gender,
-      imageUrl: user.imageUrl,
-      role: user.role,
-      status: user.status,
-      emailVerified: !!user.emailVerified,
-      lastLoginAt: fromUTCToLocal(user.lastLoginAt!).toJSDate(),
-    };
+    // Revoke user’s sessions except the current session if provided
+    await sessionService.revokeSessions(revokeSessions.map((s) => s.id));
   }
 }
 

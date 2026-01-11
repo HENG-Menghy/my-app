@@ -1,9 +1,9 @@
 // @/lib/validations/floor.ts
 
 import { z } from "zod";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
-import { SupabaseImageUrl } from "./urlSchema";
-import { AvailableHours } from "./availableHoursSchema";
+import { defaultAttributes } from "@/utils/defaultRoomAttributes";
+import { SupabaseImageURLSchema } from "./urlSchema";
+import { AvailableHoursSchema } from "./availableHoursSchema";
 
 export const FloorSchema = z
   .object({
@@ -12,20 +12,23 @@ export const FloorSchema = z
     totalRooms: z.number().int().min(0).default(0),
     name: z.string().optional(),
     description: z.string().optional(),
-    RoomsImage: SupabaseImageUrl.default(defaultRoomValues.image_url),
+    RoomsImage: SupabaseImageURLSchema.default(defaultAttributes.image_url),
     RoomsCapacities: z
       .number()
       .int()
       .min(1)
-      .default(defaultRoomValues.capacities),
+      .default(defaultAttributes.capacities),
     RoomsAmenities: z
       .array(z.string().min(1))
       .nonempty()
-      .default(defaultRoomValues.amenities),
-    RoomsAvailableHours: AvailableHours.default(
-      defaultRoomValues.available_hours
+      .default(defaultAttributes.amenities),
+    RoomsAvailableHours: AvailableHoursSchema.default(
+      defaultAttributes.available_hours
     ),
   })
   .strict();
 
-export const FloorUpdateSchema = FloorSchema.partial();
+export const FloorUpdateSchema = FloorSchema.partial().refine((data) => {
+  Object.keys(data).length > 0,
+    { message: "At least one field must be provided" };
+});

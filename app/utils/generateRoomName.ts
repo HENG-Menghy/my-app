@@ -13,7 +13,19 @@ export function getRoomName(
 
 export function getAcronym(name: string): string {
   const excludeWords = new Set([
-    "in", "at", "of", "the", "on", "a", "an", "and", "or", "to", "by", "for", "with"
+    "in",
+    "at",
+    "of",
+    "the",
+    "on",
+    "a",
+    "an",
+    "and",
+    "or",
+    "to",
+    "by",
+    "for",
+    "with",
   ]);
   const cleanedWords = name
     .trim()
@@ -21,6 +33,9 @@ export function getAcronym(name: string): string {
     .filter((word) => word && !excludeWords.has(word.toLowerCase()));
 
   return cleanedWords.length > 1
-    ? cleanedWords.map((w) => w[0]).join("").toUpperCase()
+    ? cleanedWords
+        .map((w) => w[0])
+        .join("")
+        .toUpperCase()
     : name.trim().toUpperCase();
 }

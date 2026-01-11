@@ -4,17 +4,17 @@ import { NextRequest } from 'next/server'
 import { authService } from '@/services/authService'
 import { ApiResponse } from '@/lib/api/response'
 import { validateRequest } from '@/lib/api/validate'
-import { passwordSchema } from '@/lib/validations/auth'
+import { PasswordSchema } from '@/lib/validations/auth'
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const body = await req.json()
-    const data = await validateRequest(passwordSchema.verify, body)
+    const body = await request.json()
+    const data = await validateRequest(PasswordSchema.verify, body)
 
     await authService.verifyPasswordResetOTP(data)
 
     return ApiResponse.success({
-      message: 'Code verified successfully'
+      message: 'OTP reset code verified successfully'
     })
   } catch (error) {
     return ApiResponse.error(error)

@@ -6,7 +6,7 @@ const PHNOM_PENH_TZ = "Asia/Phnom_Penh";
 
 /**
   * Converts a datetime-local input string (e.g., "2025-06-07T17:05") to JS date
-  * @param input - A string from <input type="datetime-local">
+  * @param input - A string (input type datetime-local)
   * @returns Date object
 */
 export function LocalToUTC(input: string): Date {

@@ -7,17 +7,15 @@ import { Geist } from "next/font/google";
 
 export const metadata: Metadata = {
   title: "Meeting Room Management System",
-  description: "Streamline your meeting room management with seamless booking, smart scheduling, and advanced secure authentication combine with Upstash Redis rate limiting.",
+  description: "Streamline your meeting room management with seamless booking, smart scheduling, and advanced secure authentication with rate limiting supports.",
   icons: {
     icon: "/favicon.ico",
   },
-  // description: "A robust platform for room booking, meeting scheduling, and secure authentication. Features hybrid token-session authentication with rate limiting powered by Upstash Redis.",
-  // description: "A full-featured system for managing room bookings, meeting scheduling, and secure authentication. Implements hybrid token-session authentication and rate limiting with Upstash Redis.",
 };
 
 const geistSans = Geist({
   subsets: ["latin"],
-  weight: "400",
+  weight: "500",
 });
 
 export default function RootLayout({
@@ -28,7 +26,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.className} antialiased text-sm bg-colorBg text-colorText`}
+        className={`${geistSans.className} antialiased text-sm text-textSecondary bg-colorBg`}
       >
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           {children}

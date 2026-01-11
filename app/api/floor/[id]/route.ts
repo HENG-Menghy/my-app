@@ -6,19 +6,25 @@ import { NextRequest, NextResponse } from "next/server";
 import { FormattedDateDisplay, fromUTCToLocal } from "@/utils/datetime";
 import { getRoomName } from "@/utils/generateRoomName";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
+import { defaultAttributes } from "@/utils/defaultRoomAttributes";
 import { normalizeName } from "@/utils/normalizeName";
-import { BookingStatus, RoomStatus, RoomType } from "@prisma/client";
+import { BookingStatus, RoomStatus, RoomType, UserRole } from "@prisma/client";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
 import { validateRequest } from "@/lib/api/validate";
 import { ApiResponse } from "@/lib/api/response";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { AvailableHours } from "@/lib/validations/availableHoursSchema";
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
+    const { id } = await params;
     const body = await request.json();
     const data = await validateRequest(FloorUpdateSchema, body);
     const {
@@ -44,10 +50,10 @@ export async function PATCH(
     });
     if (!floor) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Floor not found", 
-        }, 
+          message: "Floor not found",
+        },
         { status: 404 }
       );
     }
@@ -59,9 +65,9 @@ export async function PATCH(
       });
       if (existingFloor) {
         return NextResponse.json(
-          { 
+          {
             success: false,
-            message: `Floor ${floorNumber} already exists` 
+            message: `Floor ${floorNumber} already exists`,
           },
           { status: 400 }
         );
@@ -82,9 +88,9 @@ export async function PATCH(
       });
       if (existingName) {
         return NextResponse.json(
-          { 
+          {
             success: false,
-            message: `Floor name '${name.trim()}' already exists`, 
+            message: `Floor name '${name.trim()}' already exists`,
           },
           { status: 400 }
         );
@@ -99,9 +105,9 @@ export async function PATCH(
     });
     if (!building) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Building for floor not found", 
+          message: "Building for floor not found",
         },
         { status: 404 }
       );
@@ -118,7 +124,7 @@ export async function PATCH(
         id: true,
         name: true,
         availableHours: true,
-        bookings: { select: { id: true, status: true, } },
+        bookings: { select: { id: true, status: true } },
       },
     });
 
@@ -152,11 +158,11 @@ export async function PATCH(
               floorId: id,
               type: RoomType.meeting,
               status: RoomStatus.active,
-              imageUrl: RoomsImage ?? defaultRoomValues.image_url,
-              capacity: RoomsCapacities ?? defaultRoomValues.capacities,
-              amenities: RoomsAmenities ?? defaultRoomValues.amenities,
+              imageUrl: RoomsImage ?? defaultAttributes.image_url,
+              capacity: RoomsCapacities ?? defaultAttributes.capacities,
+              amenities: RoomsAmenities ?? defaultAttributes.amenities,
               availableHours:
-                RoomsAvailableHours ?? defaultRoomValues.available_hours,
+                RoomsAvailableHours ?? defaultAttributes.available_hours,
             })
           );
 
@@ -178,21 +184,21 @@ export async function PATCH(
           // Delete excess rooms (only if they have no active bookings)
           const roomsToDelete = rooms
             .filter(
-              (room, idx) => idx >= newTotalRooms && (
-                room.bookings.every((booking) => 
-                  booking.status !== BookingStatus.approved
+              (room, idx) =>
+                idx >= newTotalRooms &&
+                room.bookings.every(
+                  (booking) => booking.status !== BookingStatus.approved
                 )
-              )
             )
             .map((room) => room.id);
 
           const blockedRooms = rooms
             .filter(
-              (room, idx) => idx >= newTotalRooms && (
-                room.bookings.some((booking) => 
-                  booking.status === BookingStatus.approved
+              (room, idx) =>
+                idx >= newTotalRooms &&
+                room.bookings.some(
+                  (booking) => booking.status === BookingStatus.approved
                 )
-              )
             )
             .map((room) => room.name);
 
@@ -201,7 +207,7 @@ export async function PATCH(
               message: `Cannot reduce room count on floor ${floor.floorNumber} due to some approved bookings`,
               status: 400,
               roomsWithActiveBookings: blockedRooms,
-            }
+            };
           }
 
           await tx.room.deleteMany({ where: { id: { in: roomsToDelete } } });
@@ -209,15 +215,16 @@ export async function PATCH(
       }
 
       // ─── Updates rooms configuration (capacity, amenity, availableHours) ───
-      if (RoomsImage || RoomsCapacities || RoomsAmenities || RoomsAvailableHours) {
+      if (
+        RoomsImage ||
+        RoomsCapacities ||
+        RoomsAmenities ||
+        RoomsAvailableHours
+      ) {
         for (const room of rooms) {
           const hoursMap = new Map<string, any>();
           const overrides = RoomsAvailableHours ?? [];
-          const current = room.availableHours as {
-            dayOfWeek: string;
-            startTime: string;
-            endTime: string;
-          }[];
+          const current = room.availableHours as AvailableHours;
           for (const entry of current) {
             if (entry?.dayOfWeek) {
               hoursMap.set(entry.dayOfWeek.toLocaleLowerCase(), entry);
@@ -292,28 +299,27 @@ export async function PATCH(
         },
       });
     });
-    
+
     const [updatedBuilding, updatedFloor] = await Promise.all([
       prisma.building.findUnique({ where: { id: floor.buildingId } }),
-      prisma.floor.findUnique({ where: { id } })
+      prisma.floor.findUnique({ where: { id } }),
     ]);
 
-    return ApiResponse.success(
-      {
-        message: `Floor ${floor.floorNumber} of building ${updatedBuilding!.name} updated successfully`,
-        data: FormattedDateDisplay(updatedFloor),
-      },
-    );
+    return ApiResponse.success({
+      message: `Floor ‘${floor.floorNumber}’ of building ‘${
+        updatedBuilding!.name
+      }’ was updated successfully`,
+      data: FormattedDateDisplay(updatedFloor),
+    });
   } catch (error: any) {
-    console.error("Floor updating error:", error);
-    if (error.message && error.status) {
+    if (error.message && error.status && error.roomsWithActiveBookings) {
       return NextResponse.json(
         {
           success: false,
           message: error.message,
           roomsWithActiveBookings: error.roomsWithActiveBookings,
         },
-        { status: error.status },
+        { status: error.status }
       );
     }
     return ApiResponse.error(error);
@@ -322,11 +328,14 @@ export async function PATCH(
 
 // Get floor by id
 export async function GET(
-  _: NextRequest,
-  { params }: { params: { id: string } }
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
+    const { id } = await params;
     const floor = await prisma.floor.findUnique({
       where: { id },
       include: {
@@ -338,10 +347,10 @@ export async function GET(
 
     if (!floor) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Floor not found", 
-        }, 
+          message: "Floor not found",
+        },
         { status: 404 }
       );
     }
@@ -351,40 +360,46 @@ export async function GET(
       select: { name: true },
     });
 
-    return ApiResponse.success(
-      { 
-        message: `Successfully get ${floor.label} of building ${building!.name}`,
-        data: {
-          ...floor, 
-          createdAt: fromUTCToLocal(floor.createdAt).toFormat('yyyy-LLL-dd hh:mm:ss a'),
-          updatedAt: fromUTCToLocal(floor.updatedAt).toFormat('yyyy-LLL-dd hh:mm:ss a'),
-          rooms: floor.rooms.map(room => ({
-            ...room,
-            availableHours: sortAvailableHours(
-              room.availableHours as {
-                dayOfWeek: string;
-                startTime: string;
-                endTime: string;
-              }[]
-            ),
-            createdAt: fromUTCToLocal(room.createdAt).toFormat('yyyy-LLL-dd hh:mm:ss a'),
-            updatedAt: fromUTCToLocal(room.updatedAt).toFormat('yyyy-LLL-dd hh:mm:ss a'),
-          })),
-        },
-      }, 
-    );
+    return ApiResponse.success({
+      message: `Successfully get ‘${floor.label}’ of building ‘${
+        building!.name
+      }’`,
+      data: {
+        ...floor,
+        createdAt: fromUTCToLocal(floor.createdAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+        updatedAt: fromUTCToLocal(floor.updatedAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+        rooms: floor.rooms.map((room) => ({
+          ...room,
+          availableHours: sortAvailableHours(
+            room.availableHours as AvailableHours
+          ),
+          createdAt: fromUTCToLocal(room.createdAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
+          updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
+            "yyyy-LLL-dd hh:mm:ss a"
+          ),
+        })),
+      },
+    });
   } catch (error) {
-    console.log("Error fetching floor: ", error);
-   return ApiResponse.error(error);
+    return ApiResponse.error(error);
   }
 }
 
 // Delete floor by id
 export async function DELETE(
-  _: NextRequest,
-  { params }: { params: { id: string } }
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const { id } = await params;
     // Retrieve floor details
     const floor = await prisma.floor.findUnique({
@@ -393,9 +408,8 @@ export async function DELETE(
         id: true,
         buildingId: true,
         label: true,
-        rooms: { 
-          select: 
-          { 
+        rooms: {
+          select: {
             id: true,
             name: true,
             bookings: {
@@ -411,10 +425,10 @@ export async function DELETE(
 
     if (!floor) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Floor not found" 
-        }, 
+          message: "Floor not found",
+        },
         { status: 404 }
       );
     }
@@ -422,23 +436,26 @@ export async function DELETE(
     const building = await prisma.building.findUnique({
       where: { id: floor.buildingId },
       select: { name: true },
-    })
-    
+    });
+
     // Perform deletion floor with guard check
-    const blockedRooms: string[] = floor.rooms.filter(
-      (room) =>
+    const blockedRooms: string[] = floor.rooms
+      .filter((room) =>
         room.bookings.some(
           (booking) => booking.status === BookingStatus.approved
         )
-      ).map(room => room.name);
+      )
+      .map((room) => room.name);
     if (blockedRooms.length > 0) {
       return NextResponse.json(
         {
           success: false,
-          message: `Cannot delete ${floor.label} of building ${building!.name} because some rooms on the floor have approved bookings`,
+          message: `Cannot delete ${floor.label} of building ${
+            building!.name
+          } because some rooms on the floor have approved bookings`,
           roomsWithActiveBookings: blockedRooms,
         },
-        { status: 400 },
+        { status: 400 }
       );
     } else {
       await prisma.floor.delete({ where: { id } });
@@ -472,14 +489,11 @@ export async function DELETE(
       },
     });
 
-    return ApiResponse.success(
-      {
-        message: `${floor.label} of building ${updatedBuilding.name} was deleted successfully`,
-        data: { deletedId: id },
-      },
-    );
+    return ApiResponse.success({
+      message: `‘${floor.label}’ of building ‘${updatedBuilding.name}’ was deleted successfully`,
+      data: { deletedFloor: { id, label: floor.label } },
+    });
   } catch (error) {
-    console.log("Error deleting building: ", error);
     return ApiResponse.error(error);
   }
 }

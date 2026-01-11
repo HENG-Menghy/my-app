@@ -10,7 +10,7 @@ const dayOrder = [
   "saturday",
 ] as const;
 
-type DayOfWeek = (typeof dayOrder)[number];
+type DayOfWeek = typeof dayOrder[number];
 
 // Sorts by dayOfWeek (based on dayOrder), then by startTime
 export function sortAvailableHours(

@@ -2,10 +2,10 @@
 
 import { UserGender } from "@prisma/client";
 import { z } from "zod";
-import { SupabaseImageUrl } from "./urlSchema";
+import { SupabaseImageURLSchema } from "./urlSchema";
 
-const email = z.string().email("Invalid email address");
-const password = z
+export const email = z.string().email("Invalid email address");
+export const password = z
   .string()
   .min(8, "Password must be at least 8 characters")
   .max(16, "Password is too long")
@@ -17,19 +17,24 @@ const password = z
     "Password must contain at least one special character"
   );
 
-const phone = z
+export const phone = z
   .string()
   .regex(
     /^(0(10|11|12|14|15|16|17|31|60|61|66|67|68|69|70|071|076|078|079|086|087|088|090|092|095|096|097|098|099))\d{6,7}$/,
     "Invalid phone number format in Cambodia"
   );
 
-const otp = z
+export const fullname = z
+  .string()
+  .min(5, "Full name must be at least 5 characters")
+  .max(20, "Full name must not exceed 20 characters");
+
+export const otp = z
   .string()
   .length(6, "OTP must be exactly 6 digits")
   .regex(/^[0-9]+$/, "OTP must contain only numbers");
 
-export const registerSchema = {
+export const RegisterSchema = {
   initial: z.object({ email: email }).strict(),
 
   verify: z
@@ -49,19 +54,19 @@ export const registerSchema = {
         .max(20, "Full name must not exceed 20 characters"),
       phonenumber: phone,
       gender: z.nativeEnum(UserGender),
-      imageUrl: SupabaseImageUrl.optional(),
+      imageUrl: SupabaseImageURLSchema.optional(),
     })
     .strict(),
 };
 
-export const loginSchema = z
+export const LoginSchema = z
   .object({
     email: email,
-    password: z.string().min(1, "Password is required"),
+    password: z.string().min(1, "Password must be provided"),
   })
   .strict();
 
-export const passwordSchema = {
+export const PasswordSchema = {
   reset: z
     .object({
       email: email,
@@ -80,32 +85,46 @@ export const passwordSchema = {
       email: email,
       otp: otp,
       password: password,
+      confirmPassword: password,
     })
-    .strict(),
+    .strict()
+    .refine((data) => data.password === data.confirmPassword, {
+      message: "Password does not match",
+      path: ["confirmPassword"],
+    }),
 
   change: z
     .object({
-      currentPassword: z.string().min(1, "Current password is required"),
+      currentPassword: z.string().min(1, "Current password must be provided"),
       newPassword: password,
+      confirmPassword: password,
     })
     .strict()
-    .refine((data) => data.currentPassword !== data.newPassword, {
-      message: "New password must be different from current password",
-      path: ["newPassword"],
+    .superRefine((data, ctx) => {
+      if (data.currentPassword === data.newPassword) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["newPassword"],
+          message: "New password must be different from current password",
+        });
+      }
+
+      if (data.newPassword !== data.confirmPassword) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["confirmPassword"],
+          message: "Password does not match",
+        });
+      }
     }),
 };
 
-export const profileSchema = z
+export const ProfileUpdateSchema = z
   .object({
-    email: email.optional(),
-    fullname: z
-      .string()
-      .min(5, "Full name must be at least 5 characters")
-      .max(20, "Full name must not exceed 20 characters")
-      .optional(),
+    fullname: fullname.optional(),
     phonenumber: phone.optional(),
     gender: z.nativeEnum(UserGender).optional(),
-    imageUrl: SupabaseImageUrl.optional(),
+    imageUrl: SupabaseImageURLSchema.optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided",

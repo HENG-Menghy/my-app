@@ -1,11 +1,11 @@
 // @/services/otpService.ts
 
 import crypto from "crypto";
-import { RedisClient } from "@/lib/auth/redis";
+import { UpstashRedis } from "@/lib/upstash-redis";
 import { AuthError } from "@/lib/auth/errors";
-import { AUTH_CONSTANTS, REDIS_PREFIXES } from "@/lib/auth/constants";
+import { AUTH_CONSTANTS, REDIS_PREFIXES } from "@/lib/constants";
 import type { OTPData } from "@/types/redis";
-import { fromUTCToLocal } from "@/utils/datetime";
+import { LocalToUTC, fromUTCToLocal } from "@/utils/datetime";
 import { Logger } from "@/lib/logger";
 
 class OTPService {
@@ -13,21 +13,22 @@ class OTPService {
     // Generate 6-digits code
     const otp = crypto.randomInt(100000, 999999).toString();
     const key = `${REDIS_PREFIXES.OTP}${type}:${email}`;
-
+    const localDateTime = fromUTCToLocal(
+      new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY * 1000)
+    ).toString();
     const otpData: OTPData = {
       email,
       type,
       code: otp,
       attempts: 0,
       verified: false,
-      expiresAt: fromUTCToLocal(
-        new Date(Date.now() + AUTH_CONSTANTS.OTP_EXPIRY * 1000)
-      ).toJSDate(),
+      expiresAt: localDateTime,
     };
-
-    await RedisClient.set(key, JSON.stringify(otpData), {
-      ex: AUTH_CONSTANTS.OTP_EXPIRY,
-    });
+    await UpstashRedis.set(
+      key,
+      JSON.stringify(otpData),
+      AUTH_CONSTANTS.OTP_EXPIRY
+    );
 
     return otp;
   }
@@ -37,7 +38,7 @@ class OTPService {
     type: OTPData["type"]
   ): Promise<OTPData | null> {
     const key = `${REDIS_PREFIXES.OTP}${type}:${email}`;
-    const data = await RedisClient.get(key);
+    const data = (await UpstashRedis.get(key)) as unknown as OTPData;
     return data && typeof data === "string" ? JSON.parse(data) : data;
   }
 
@@ -51,44 +52,44 @@ class OTPService {
 
     if (!data) {
       Logger.error(
-        "VERIFY_EMAIL_FAILED",
-        new Error("The verification code does not exists for this email")
+        "VERIFY_OTP_FAILED",
+        new Error(
+          "OTP not found or has expired. Please request a new verification code"
+        )
       );
 
       throw AuthError.otpNotFound();
     }
 
-    // Update attempts
+    // Update attempts and expiration
     data.attempts += 1;
-
-    // Convert string back to DateTime
-    data.expiresAt = fromUTCToLocal(data.expiresAt).toJSDate();
-
+    const expiresTime = LocalToUTC(data.expiresAt);
+    data.expiresAt = fromUTCToLocal(expiresTime).toString();
     if (data.code !== otp) {
-      await RedisClient.set(key, JSON.stringify(data), {
-        ex: Math.floor(
-          (data.expiresAt.getTime() - new Date().getTime()) / 1000
-        ),
-      });
+      await UpstashRedis.set(
+        key,
+        JSON.stringify(data),
+        Math.floor((expiresTime.getTime() - new Date().getTime()) / 1000)
+      );
 
       throw AuthError.invalidOTP();
     }
 
-    // OTP verified correctly within allowed time
+    // OTP verified correctly within allowed time, set new expiration
     data.verified = true;
     data.expiresAt = fromUTCToLocal(
       new Date(Date.now() + AUTH_CONSTANTS.EMAIL_VERIFIED_EXPIRY * 1000)
-    ).toJSDate();
-    await RedisClient.set(
+    ).toString();
+    await UpstashRedis.set(
       key,
       JSON.stringify(data),
-      { ex: AUTH_CONSTANTS.EMAIL_VERIFIED_EXPIRY } // Mark email as verified for 10 minutes
+      AUTH_CONSTANTS.EMAIL_VERIFIED_EXPIRY // Mark email as verified for 10 minutes
     );
   }
 
   async clearOTPData(email: string, type: OTPData["type"]): Promise<void> {
     const key = `${REDIS_PREFIXES.OTP}${type}:${email}`;
-    await RedisClient.del(key);
+    await UpstashRedis.del(key);
   }
 }
 

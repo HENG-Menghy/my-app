@@ -1,26 +1,31 @@
 // @/api/auth/logout/route.ts
 
-import { cookies } from 'next/headers'
-import { NextRequest } from 'next/server'
-import { authService } from '@/services/authService'
-import { ApiResponse } from '@/lib/api/response'
-import { COOKIES } from '@/lib/auth/constants'
-import { getAuthUser } from '@/lib/api/auth'
+import { NextRequest } from "next/server";
+import { authService } from "@/services/authService";
+import { ApiResponse } from "@/lib/api/response";
+import { COOKIES } from "@/lib/constants";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { CookieManager } from "@/lib/cookies";
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
-    const { userId, sessionId } = await getAuthUser(req)
-    await authService.logout(userId, sessionId)
+    const authUser = await getAuthUser(request);
+    if (!authUser) throw AuthError.unauthorized();
+
+    const { userId, sessionId } = authUser;
+    await authService.logout(userId, sessionId);
+
+    const response = ApiResponse.success({
+      message: "Logged out successfully",
+    });
 
     // Clear cookies
-    const cookieStore = await cookies()
-    cookieStore.set(COOKIES.ACCESS_TOKEN, '', { maxAge: 0 })
-    cookieStore.set(COOKIES.REFRESH_TOKEN, '', { maxAge: 0 })
+    CookieManager.delete(COOKIES.ACCESS_TOKEN_NAME, response);
+    CookieManager.delete(COOKIES.REFRESH_TOKEN_NAME, response);
 
-    return ApiResponse.success({
-      message: 'Logged out successfully'
-    })
+    return response;
   } catch (error) {
-    return ApiResponse.error(error)
+    return ApiResponse.error(error);
   }
 }

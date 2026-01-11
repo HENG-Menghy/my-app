@@ -1,6 +1,6 @@
 // @/components/buttons/button.tsx
 
-import { ButtonProps } from "@/types/props";
+import { ButtonOrLinkProps } from "@/types/props";
 import Link from "next/link";
 
 const ButtonOrLink = ({
@@ -13,22 +13,23 @@ const ButtonOrLink = ({
   title,
   width,
   onClick,
-}: ButtonProps) => {
+}: ButtonOrLinkProps) => {
   let className = "";
+  let rounded = borderRadius ? borderRadius : 'rounded-lg';
   if (level === "primary") {
-    className = `${padding} ${borderRadius} ${width} cursor-pointer text-white inline-block bg-primary hover:bg-primaryHover active:bg-primaryActive transition-colors duration-75 animate-subtle-saturate`;
+    className = `${padding} ${rounded} ${width} cursor-pointer text-white inline-block bg-primary hover:bg-primaryHover active:bg-primaryActive transition-colors duration-75 ease-in-out`;
   }
 
   if (level === "secondary") {
-    className = `${padding} ${borderRadius} ${width} cursor-pointer text-white inline-block bg-secondary hover:bg-secondaryHover active:bg-secondaryActive transition-colors duration-75 animate-subtle-saturate`;
+    className = `${padding} ${rounded} ${width} cursor-pointer text-white inline-block bg-secondary hover:bg-secondaryHover active:bg-secondaryActive transition-colors duration-75 ease-in-out`;
   } 
 
-  if (level === "warning") {
-    className = `${padding} ${borderRadius} ${width} cursor-pointer text-white inline-block bg-warning hover:bg-warningHover active:bg-warningActive transition-colors duration-75 animate-subtle-saturate`;
+  if (level === "warn") {
+    className = `${padding} ${rounded} ${width} cursor-pointer text-white inline-block bg-warning hover:bg-warningHover active:bg-warningActive transition-colors duration-75 ease-in-out`;
   }
   
   if (level === "danger") {
-    className = `${padding} ${borderRadius} ${width} cursor-pointer text-white inline-block bg-danger hover:bg-dangerHover active:bg-dangerActive transition-colors duration-75 animate-subtle-saturate`;
+    className = `${padding} ${rounded} ${width} cursor-pointer text-white inline-block bg-danger hover:bg-dangerHover active:bg-dangerActive transition-colors duration-75 ease-in-out`;
   }
 
   if (href) {

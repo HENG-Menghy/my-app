@@ -1,4 +1,4 @@
-// admin/page.tsx
+// app/admin/page.tsx
 
 export default function Admin () {
     return (

@@ -1,6 +1,6 @@
 // @/services/tokenService.ts
 
-import { JWT } from "@/lib/auth/jwt";
+import { JWT } from "@/lib/jwt";
 import { Logger } from "@/lib/logger";
 import type { AuthTokens } from "@/types/auth";
 import { UserRole } from "@prisma/client";
@@ -15,20 +15,14 @@ class TokenService {
     try {
       const [accessToken, refreshToken] = await Promise.all([
         JWT.signAccessToken(payload),
-
         JWT.signRefreshToken({
           uid: payload.uid,
           sid: payload.sid,
         }),
       ]);
-      
-      Logger.info("TOKENS_GENERATED_SUCCESSFULLY", {
-        uid: payload.uid,
-        sid: payload.sid,
-        accessToken,
-        refreshToken,
-      });
-      
+
+      Logger.debug("GENERATE_TOKENPAIR_SUCCESSFULLY");
+
       return {
         accessToken,
         refreshToken,

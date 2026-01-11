@@ -3,6 +3,6 @@
 import {
   BuildingSchema,
   BuildingUpdateSchema,
-} from "@/app/validations/building";
+} from "@/lib/validations/building";
 
 export async function createBuilding() {}

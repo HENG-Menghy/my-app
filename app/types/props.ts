@@ -1,10 +1,10 @@
 // @/types/props.ts
 
-export type ButtonProps = {
+export type ButtonOrLinkProps = {
   name: string;
-  level: "primary" | "secondary" | "warning" | "danger";
+  level: "primary" | "secondary" | "warn" | "danger";
   padding: string;
-  borderRadius: string;
+  borderRadius?: string;
   href?: string;
   ariaLabel?: string;
   title?: string;

@@ -5,20 +5,26 @@ import { NextRequest, NextResponse } from "next/server";
 import { FormattedDateDisplay, fromUTCToLocal } from "@/utils/datetime";
 import { getFloorLabel } from "@/utils/generateFloorLabel";
 import { getAcronym, getRoomName } from "@/utils/generateRoomName";
-import { defaultRoomValues } from "@/utils/defaultRoomValues";
+import { defaultAttributes } from "@/utils/defaultRoomAttributes";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
 import { BuildingUpdateSchema } from "@/lib/validations/building";
 import { ApiResponse } from "@/lib/api/response";
 import { validateRequest } from "@/lib/api/validate";
 import { normalizeName } from "@/utils/normalizeName";
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, UserRole } from "@prisma/client";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { AvailableHours } from "@/lib/validations/availableHoursSchema";
 
 // Get building by id
 export async function GET(
-  _: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const { id } = await params;
     const building = await prisma.building.findUnique({
       where: { id },
@@ -47,7 +53,7 @@ export async function GET(
     }
 
     return ApiResponse.success({
-      message: `Successfully get building ${building.name}`,
+      message: `Successfully get building ‘${building.name}’`,
       data: {
         ...building,
         createdAt: fromUTCToLocal(building.createdAt).toFormat(
@@ -61,11 +67,7 @@ export async function GET(
           rooms: floor.rooms.map((room) => ({
             ...room,
             availableHours: sortAvailableHours(
-              room.availableHours as {
-                dayOfWeek: string;
-                startTime: string;
-                endTime: string;
-              }[]
+              room.availableHours as AvailableHours
             ),
             createdAt: fromUTCToLocal(room.createdAt).toFormat(
               "yyyy-LLL-dd hh:mm:ss a"
@@ -78,17 +80,19 @@ export async function GET(
       },
     });
   } catch (error) {
-    console.error("Error fetching building:", error);
     return ApiResponse.error(error);
   }
 }
 
 // Delete building
 export async function DELETE(
-  _: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const { id } = await params;
     // Find the building and related floors and rooms
     const building = await prisma.building.findUnique({
@@ -111,11 +115,10 @@ export async function DELETE(
     await prisma.building.delete({ where: { id } });
 
     return ApiResponse.success({
-      message: `Building ${building.name} was successfully deleted`,
-      data: { deletedId: id },
+      message: `Building ‘${building.name}’ was deleted successfully`,
+      data: { deletedBuilding: { id: building.id, name: building.name } },
     });
   } catch (error) {
-    console.error("Error deleting building: ", error);
     return ApiResponse.error(error);
   }
 }
@@ -126,6 +129,9 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
     const { id } = await params;
     const body = await request.json();
     const data = await validateRequest(BuildingUpdateSchema, body);
@@ -240,15 +246,18 @@ export async function PATCH(
           );
           if (groundFloor) {
             const roomsWithBookings = groundFloor.rooms
-              .filter((room) => room.bookings.some(
-                (booking) => booking.status === BookingStatus.approved
-              ))
+              .filter((room) =>
+                room.bookings.some(
+                  (booking) => booking.status === BookingStatus.approved
+                )
+              )
               .map((room) => room.name);
 
             if (roomsWithBookings.length > 0) {
               throw {
                 status: 400,
-                message: "Cannot remove ground floor; some rooms contain approved bookings",
+                message:
+                  "Cannot remove ground floor; some rooms contain approved bookings",
                 roomsWithActiveBookings: roomsWithBookings,
               };
             }
@@ -318,11 +327,10 @@ export async function PATCH(
           const blockedRooms: string[] = existingBuilding.floors
             .filter((floor) => floor.floorNumber > totalFloors!)
             .flatMap((floor) =>
-              floor.rooms.filter(
-                (room) =>
-                  room.bookings.some(
-                    (booking) => booking.status === BookingStatus.approved
-                  )
+              floor.rooms.filter((room) =>
+                room.bookings.some(
+                  (booking) => booking.status === BookingStatus.approved
+                )
               )
             )
             .map((room) => room.name);
@@ -330,7 +338,8 @@ export async function PATCH(
           if (blockedRooms.length > 0) {
             throw {
               status: 400,
-              message: "Cannot reduce the number of floors because some rooms on the floors have approved bookings",
+              message:
+                "Cannot reduce the number of floors because some rooms on the floors have approved bookings",
               roomsWithActiveBookings: blockedRooms,
             };
           }
@@ -364,11 +373,11 @@ export async function PATCH(
                   floor.floorNumber,
                   existingCount + i
                 ),
-                imageUrl: RoomsImage ?? defaultRoomValues.image_url,
-                capacity: RoomsCapacities ?? defaultRoomValues.capacities,
-                amenities: RoomsAmenities ?? defaultRoomValues.amenities,
+                imageUrl: RoomsImage ?? defaultAttributes.image_url,
+                capacity: RoomsCapacities ?? defaultAttributes.capacities,
+                amenities: RoomsAmenities ?? defaultAttributes.amenities,
                 availableHours:
-                  RoomsAvailableHours ?? defaultRoomValues.available_hours,
+                  RoomsAvailableHours ?? defaultAttributes.available_hours,
               })
             );
             await tx.room.createMany({ data: newRoomsData });
@@ -404,11 +413,7 @@ export async function PATCH(
             // Create a map from existing for faster lookup
             const hoursMap = new Map<string, any>();
             const overrides = RoomsAvailableHours ?? [];
-            const currrentHours = room.availableHours as {
-              dayOfWeek: string;
-              startTime: string;
-              endTime: string;
-            }[];
+            const currrentHours = room.availableHours as AvailableHours;
             for (const entry of currrentHours) {
               if (entry?.dayOfWeek) {
                 hoursMap.set(entry.dayOfWeek.toLowerCase(), entry);
@@ -445,9 +450,10 @@ export async function PATCH(
       if (roomWithActiveBookings.length > 0) {
         throw {
           status: 400,
-          message: "Cannot reduce rooms. The following rooms have approved bookings",
+          message:
+            "Cannot reduce rooms. The following rooms have approved bookings",
           roomsWithActiveBookings: roomWithActiveBookings,
-        }
+        };
       }
 
       if (deletableRoomIds.length > 0) {
@@ -483,12 +489,11 @@ export async function PATCH(
     });
 
     return ApiResponse.success({
-      message: `Building ${existingBuilding.name} was successfully updated`,
+      message: `Building ‘${existingBuilding.name}’ was updated successfully`,
       data: FormattedDateDisplay(updateBuilding),
     });
   } catch (error: any) {
-    console.error("Error updating building:", error);
-    if (error.status && error.message) {
+    if (error.status && error.message && error.roomsWithActiveBookings) {
       return NextResponse.json(
         {
           success: false,

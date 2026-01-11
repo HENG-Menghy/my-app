@@ -1,23 +1,28 @@
 // @/utils/getTimeDifference.ts
 
 // Convert time difference in human readable format
-export const getTimeDifference = (mils: number): string => {
-  if (mils < 60) return `${mils} seconds`;
-  if (mils < 3600)
+export const getTimeDifference = (seconds: number): string => {
+  if (seconds < 60) 
     return `${
-      Math.floor(mils / 60) === 1
-        ? `${Math.floor(mils / 60)} minute`
-        : `${Math.floor(mils / 60)} minutes`
+      seconds === 0 || seconds === 1 
+        ? `${seconds} second`
+        : `${seconds} seconds`
     }`;
-  if (mils < 86400)
+  if (seconds < 3600)
     return `${
-      Math.floor(mils / 3600) === 1
-        ? `${Math.floor(mils / 3600)} hour`
-        : `${Math.floor(mils / 3600)} hours`
+      Math.floor(seconds / 60) === 1
+        ? `${Math.floor(seconds / 60)} minute`
+        : `${Math.floor(seconds / 60)} minutes`
+    }`;
+  if (seconds < 86400)
+    return `${
+      Math.floor(seconds / 3600) === 1
+        ? `${Math.floor(seconds / 3600)} hour`
+        : `${Math.floor(seconds / 3600)} hours`
     }`;
   return `${
-    Math.floor(mils / 86400) === 1
-      ? `${Math.floor(mils / 86400)} day`
-      : `${Math.floor(mils / 86400)} days`
+    Math.floor(seconds / 86400) === 1
+      ? `${Math.floor(seconds / 86400)} day`
+      : `${Math.floor(seconds / 86400)} days`
   }`;
 };

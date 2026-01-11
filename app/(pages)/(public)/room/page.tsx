@@ -1,4 +1,4 @@
-// room/page.tsx
+// app/room/page.tsx
 
 export default function RoomPage() {
   return (

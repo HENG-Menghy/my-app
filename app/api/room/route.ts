@@ -7,15 +7,20 @@ import { LocalToUTC, fromUTCToLocal } from "@/utils/datetime";
 import { getRoomName } from "@/utils/generateRoomName";
 import { normalizeName } from "@/utils/normalizeName";
 import { sortAvailableHours } from "@/utils/sortAvailableHours";
-import { z } from "zod";
 import { validateRequest } from "@/lib/api/validate";
 import { ApiResponse } from "@/lib/api/response";
-import { BookingStatus } from "@prisma/client";
+import { BookingStatus, RoomStatus, RoomType, UserRole } from "@prisma/client";
+import { getAuthUser } from "@/lib/auth/auth";
+import { AuthError } from "@/lib/auth/errors";
+import { AvailableHours } from "@/lib/validations/availableHoursSchema";
 
 // CREATE Room
 export async function POST(request: NextRequest) {
   try {
-    let body = await request.json();
+    const authUser = await getAuthUser(request);
+    if (!authUser || authUser.role !== UserRole.admin)
+      throw AuthError.forbidden();
+    const body = await request.json();
     const data = await validateRequest(RoomSchema, body);
     const { floorId } = data;
 
@@ -26,11 +31,11 @@ export async function POST(request: NextRequest) {
     });
     if (!existingFloor) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Floor does not exist", 
+          message: "Floor does not exist",
         },
-        { status: 400 },
+        { status: 400 }
       );
     }
 
@@ -41,9 +46,9 @@ export async function POST(request: NextRequest) {
     });
     if (!building) {
       return NextResponse.json(
-        { 
+        {
           success: false,
-          message: "Building for floor does not exist", 
+          message: "Building for floor does not exist",
         },
         { status: 400 }
       );
@@ -119,15 +124,11 @@ export async function POST(request: NextRequest) {
     });
 
     return ApiResponse.success({
-      message: `Room(${room.name}) was successfully created on floor ${existingFloor.floorNumber} of building ${building.name}`,
+      message: `Room(${room.name}) was successfully created on floor ‘${existingFloor.floorNumber}’ of building ‘${building.name}’`,
       data: {
         ...room,
         availableHours: sortAvailableHours(
-          room.availableHours as {
-            dayOfWeek: string;
-            startTime: string;
-            endTime: string;
-          }[]
+          room.availableHours as AvailableHours
         ),
         createdAt: fromUTCToLocal(room.createdAt).toFormat(
           "yyyy-LLL-dd hh:mm:ss a"
@@ -139,141 +140,6 @@ export async function POST(request: NextRequest) {
       status: 201,
     });
   } catch (error: unknown) {
-    console.error("Room creation error:", error);
-    return ApiResponse.error(error);
-  }
-}
-
-// DELETE all rooms by floor/building/all; and skipping those with bookings
-export async function DELETE(request: NextRequest) {
-  try {
-    const validIds = z
-      .object({
-        floorId: z.string().uuid().optional(),
-        buildingId: z.string().uuid().optional(),
-      })
-      .strict();
-    const body = await request.json();
-    const { floorId, buildingId } = await validateRequest(validIds, body);
-
-    // Build the filter
-    const filter: Record<string, any> = {};
-
-    // Allow only one criteria (floorId, or buildingId, or neither)
-    if (floorId && buildingId) {
-      return NextResponse.json(
-        { 
-          success: false,
-          message: "Provide only one: either floorId or buildingId, not both" 
-        },
-        { status: 400 }
-      );
-    }
-
-    if (floorId) {
-      filter.floorId = floorId;
-    } else if (buildingId) {
-      filter.floor = { buildingId };
-    }
-
-    // Fetch all condidate rooms
-    const candidateRooms = await prisma.room.findMany({
-      where: filter,
-      select: {
-        id: true,
-        name: true,
-        floorId: true,
-        floor: { select: { buildingId: true } },
-      },
-    });
-
-    if (candidateRooms.length === 0) {
-      return NextResponse.json(
-        { 
-          success: false,
-          message: "No rooms found matching criteria" 
-        },
-        { status: 404 }
-      );
-    }
-
-    const deletedRooms: string[] = [];
-    const skippedRooms: string[] = [];
-    const deletableRoomIds: string[] = [];
-    
-    // Get room IDs with approved bookings in a single query
-    const approvedBookings = await prisma.booking.findMany({
-      where: {
-        roomId: { in: candidateRooms.map(r => r.id) },
-        status: BookingStatus.approved,
-      },
-      select: { roomId: true },
-      distinct: ['roomId'],
-    });
-
-    // Create a Set for quick lookup
-    const roomsWithApprovedBookings = new Set(approvedBookings.map((b) => b.roomId));
-    for (const room of candidateRooms) {
-      if (roomsWithApprovedBookings.has(room.id)) {
-        skippedRooms.push(room.name!)
-      } else {
-        deletableRoomIds.push(room.id);
-        deletedRooms.push(room.name!);
-      }
-    }
-
-    if (deletableRoomIds.length > 0) {
-      await prisma.$transaction(async (tx) => {
-        // Delete the rooms
-        await tx.room.deleteMany({ where: { id: { in: deletableRoomIds } } });
-
-        // Update totalRooms on affected floors
-        const floorIds = [
-          ...new Set(
-            candidateRooms
-              .filter((room) => deletableRoomIds.includes(room.id))
-              .map((room) => room.floorId)
-          ),
-        ];
-
-        for (const floorId of floorIds) {
-          const roomCount = await tx.room.count({ where: { floorId } });
-          await tx.floor.update({
-            where: { id: floorId },
-            data: { totalRooms: roomCount },
-          });
-        }
-
-        // Update totalRooms on affected buildings
-        const buildingIds = [
-          ...new Set(
-            candidateRooms
-              .filter((room) => deletableRoomIds.includes(room.id))
-              .map((room) => room.floor.buildingId)
-          ),
-        ];
-
-        for (const buildingId of buildingIds) {
-          const roomCount = await tx.room.count({
-            where: { floor: { buildingId } },
-          });
-          await tx.building.update({
-            where: { id: buildingId },
-            data: { totalRooms: roomCount },
-          });
-        }
-      });
-    }
-
-    return ApiResponse.success({
-      message: `Successfully deleted ${deletedRooms.length} room(s)${skippedRooms.length > 0 ? `; skipped ${skippedRooms.length} room(s) because of containing some active bookings` : ''}`,
-      data: {
-        "deletedRoom(s)": deletedRooms,
-        "skippedRoom(s)": skippedRooms,
-      },
-    });
-  } catch (error) {
-    console.error("Room bulk deletion error:", error);
     return ApiResponse.error(error);
   }
 }
@@ -281,156 +147,149 @@ export async function DELETE(request: NextRequest) {
 // GET rooms by filtering/searching
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
+    const searchParams = request.nextUrl.searchParams;
+    const search = searchParams.get("search")?.trim().toLowerCase() || "";
     const buildingId = searchParams.get("buildingId");
     const floorId = searchParams.get("floorId");
-    const roomName = searchParams.get("name")?.toLowerCase();
-    const amenity = searchParams.get("amenities");
-    const capacity = searchParams.get("capacity");
     const roomType = searchParams.get("type");
     const roomStatus = searchParams.get("status");
     const startDateTimeString = searchParams.get("from");
     const endDateTimeString = searchParams.get("to");
 
-    // Time filtering setup
+    // --- Validate date filters
     let startDateTime: Date | null = null;
     let endDateTime: Date | null = null;
-
+    if (
+      (startDateTimeString && !endDateTimeString) ||
+      (!startDateTimeString && endDateTimeString)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Both ‘from’ and ‘to’ parameters are required for availability filtering",
+        },
+        { status: 400 }
+      );
+    }
     if (startDateTimeString && endDateTimeString) {
       startDateTime = LocalToUTC(startDateTimeString);
       endDateTime = LocalToUTC(endDateTimeString);
     }
 
-    // Build initial room filter
-    const filter: Record<string, any> = {};
+    // --- Prepare context info (for message)
+    let floorNumber: number | undefined;
+    let buildingName: string | undefined;
 
-    let floorNumber: number;
-    let buildingName: string;
     if (floorId) {
       const floor = await prisma.floor.findUnique({
         where: { id: floorId },
         select: {
           floorNumber: true,
-          building: {
-            select: { name: true },
-          },
+          building: { select: { name: true } },
         },
       });
-      if(!floor) {
+      if (!floor) {
         return NextResponse.json(
-          { 
+          {
             success: false,
-            message: "The provided floorId param does not exist for any floor" 
+            message: "The provided floor does not exist",
           },
-          { status: 400 },
+          { status: 400 }
         );
       }
       floorNumber = floor.floorNumber;
       buildingName = floor.building.name;
-      filter.floorId = floorId;
     } else if (buildingId) {
       const building = await prisma.building.findUnique({
         where: { id: buildingId },
         select: { name: true },
       });
-      if(!building) {
+      if (!building) {
         return NextResponse.json(
-          { 
+          {
             success: false,
-            message: "The provided buildingId param does not exist for any building" 
+            message: "The provided building does not exist",
           },
-          { status: 400 },
+          { status: 400 }
         );
       }
       buildingName = building.name;
-      filter.floor = { buildingId };
     }
 
-    if (roomName?.trim()) {
-      filter.name = { contains: roomName.trim(), mode: "insensitive" };
+    // --- filters
+    const filter: any = {
+      ...(floorId ? { floorId } : {}),
+      ...(buildingId && !floorId ? { floor: { buildingId } } : {}),
+      ...(roomType ? { type: roomType as RoomType } : {}),
+      ...(roomStatus ? { status: roomStatus as RoomStatus } : {}),
+    };
+
+    // -- search
+    if (search) {
+      const parsedCapacity = parseInt(search, 10);
+      filter.OR = [
+        { name: { contains: search, mode: "insensitive" } },
+        ...(isNaN(parsedCapacity)
+          ? []
+          : [{ capacity: { gte: parsedCapacity } }]),
+        { amenities: { has: search } },
+      ];
     }
 
-    if (capacity) {
-      filter.capacity = { gte: parseInt(capacity) };
-    }
-
-    if (roomType) {
-      filter.type = roomType;
-    }
-
-    if (roomStatus) {
-      filter.status = roomStatus;
-    }
-
-    if (amenity?.trim()) {
-      filter.amenities = { has: amenity.trim() };
-    }
-
-    const include = {
-      ...(startDateTime &&
-        endDateTime && {
-          bookings: {
-            where: {
-              startDateTime: { lt: endDateTime },
-              endDateTime: { gt: startDateTime },
-            },
-            select: { id: true },
+    // --- Query rooms
+    let rooms;
+    const baseWhere: any = {
+      AND: [filter],
+    };
+    if (startDateTime && endDateTime) {
+      // Exclude conflicting rooms directly
+      baseWhere.NOT = {
+        bookings: {
+          some: {
+            startDateTime: { lt: endDateTime },
+            endDateTime: { gt: startDateTime },
           },
-        }),
-    } as const;
+        },
+      };
+    }
+    rooms = await prisma.room.findMany({
+      where: baseWhere,
+      orderBy: [
+        { floor: { floorNumber: "asc" } },
+        { name: "asc" },
+      ]
+    })
 
-    const candidateRooms = await prisma.room.findMany({
-      where: filter,
-      include,
-      orderBy: { name: "asc" },
-    });
-
-    // Filter out rooms with conflicting bookings
-    const availableRooms = candidateRooms.filter((room) => {
-      if (startDateTime && endDateTime) {
-        return room.bookings.length === 0;
-      }
-      return true;
-    });
+    // --- Response context message
+    const contextMessage = floorId
+      ? ` on floor ${floorNumber} of building ‘${buildingName}’`
+      : buildingId
+      ? ` in building ‘${buildingName}’`
+      : "";
 
     return ApiResponse.success({
-      message: `Successfully get all(${availableRooms.length}) room(s)${`${ floorId
-          ? ` belong to floor ${floorNumber!} of building ${buildingName!}`
-          : ''
-        }${ buildingId 
-          ? ` in building ${buildingName!}` 
-          : ''
-        }`
-      }`,
-      data: {
-        availableRooms: availableRooms.map((room) => ({
-          id: room.id,
-          floorId: room.floorId,
-          imageUrl: room.imageUrl,
-          name: room.name,
-          type: room.type,
-          status: room.status,
-          capacity: room.capacity,
-          amenities: room.amenities,
-          availableHours: sortAvailableHours(
-            room.availableHours as {
-              dayOfWeek: string;
-              startTime: string;
-              endTime: string;
-            }[]
-          ),
-          description: room.description,
-          createdAt: fromUTCToLocal(room.createdAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-          updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
-            "yyyy-LLL-dd hh:mm:ss a"
-          ),
-        })),
-      },
+      message: `Successfully fetched ${rooms.length} room(s)${contextMessage}`,
+      data: rooms.map((room) => ({
+        id: room.id,
+        floorId: room.floorId,
+        imageUrl: room.imageUrl,
+        name: room.name,
+        type: room.type,
+        status: room.status,
+        capacity: room.capacity,
+        amenities: room.amenities,
+        availableHours: sortAvailableHours(room.availableHours as AvailableHours),
+        description: room.description,
+        createdAt: fromUTCToLocal(room.createdAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+        updatedAt: fromUTCToLocal(room.updatedAt).toFormat(
+          "yyyy-LLL-dd hh:mm:ss a"
+        ),
+      })),
     });
   } catch (error) {
-    console.error("Room search failed:", error);
     return ApiResponse.error(error);
   }
 }
